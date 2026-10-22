@@ -1,0 +1,19 @@
+
+# Private project documentation
+API_buil_Instruction.md
+API_documentaion.md
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environment and cache
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Test and coverage artifacts
+.coverage
+htmlcov/

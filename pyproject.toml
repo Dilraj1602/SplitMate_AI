@@ -1,0 +1,17 @@
+[project]
+name = "splitmateai"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "fastapi[standard]>=0.160.0",
+    "httpx>=0.28.1",
+    "langchain>=1.4.7",
+    "langchain-groq>=1.1.3",
+    "langgraph>=1.2.16",
+    "langsmith>=0.14.12",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.16.1",
+    "pytest>=9.1.1",
+    "sqlalchemy>=2.1.6",
+]
