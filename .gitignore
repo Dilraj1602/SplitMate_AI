@@ -1,19 +1,225 @@
 
-# Private project documentation
-API_buil_Instruction.md
-API_documentaion.md
+# ==================================================
+# SplitMate AI - Root .gitignore
+# ==================================================
 
-# Environment variables and secrets
+# 1. Environment variables, secrets and credentials
 .env
 .env.*
 !.env.example
+!.env.*.example
+!.env.*.sample
 
-# Python virtual environment and cache
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+*.keystore
+secrets/
+secrets.*
+credentials/
+credentials.json
+service-account*.json
+*service-account*.json
+
+# 2. Python environments
 .venv/
+venv/
+env/
+ENV/
+.python-version.local
+
+# 3. Python bytecode and caches
 __pycache__/
 *.py[cod]
+*$py.class
+*.pyo
 .pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.hypothesis/
+.pytype/
+.tox/
+.nox/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+wheels/
+share/python-wheels/
+.pybuild/
 
-# Test and coverage artifacts
+# Python packaging output
+build/
+dist/
+site/
+
+# 4. Test coverage and reports
 .coverage
+.coverage.*
 htmlcov/
+coverage/
+coverage.xml
+nosetests.xml
+junit.xml
+pytestdebug.log
+test-results/
+playwright-report/
+.nyc_output/
+
+# 5. Frontend dependencies
+node_modules/
+bower_components/
+
+# Frontend build output and framework caches
+dist/
+build/
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.angular/
+.vite/
+.parcel-cache/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# 6. Package manager and tool caches
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/install-state.gz
+
+# Keep package.json and lockfiles tracked.
+
+# 7. Local databases and database backups
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.dump
+*.bak
+*.backup
+*.sql.gz
+*.pgdump
+database_backups/
+db_backups/
+
+# Keep database migration source files tracked.
+# Do not ignore backend/migrations/ or Alembic version scripts.
+
+# 8. Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*.orig
+*.rej
+*.pid
+*.seed
+
+# 9. Operating system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+desktop.ini
+$RECYCLE.BIN/
+.Trashes/
+
+# 10. IDEs and local editor configuration
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-workspace
+*.sublime-project
+
+# Remove .vscode/ above if you want to share
+# selected workspace settings with collaborators.
+
+# 11. Local development and environment overrides
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.local
+
+# 12. AI tools and experiment artifacts
+.langsmith/
+.langgraph_api/
+.chroma/
+.chromadb/
+vector_store/
+vectorstore/
+embeddings_cache/
+model_cache/
+*.model
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.bin
+
+# Keep prompts, source code, configuration templates,
+# and AI workflow definitions tracked.
+
+# 13. Generated documentation exports
+# Keep Markdown documentation and source documents tracked.
+docs/**/*.pdf
+docs/**/*.docx
+docs/**/*.xlsx
+docs/**/*.pptx
+
+# 14. Generated reports and exports
+generated/
+artifacts/
+exports/
+reports/generated/
+
+# 15. Local runtime and application state
+instance/
+run/
+runtime/
+*.sock
+
+# 16. Infrastructure and deployment secrets
+terraform.tfstate
+terraform.tfstate.*
+.terraform/
+*.tfstate
+*.tfstate.*
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# 17. Debugging and profiling
+.prof
+.prof/
+*.prof
+*.trace
+*.dump
+debug.log
+
+# 18. Keep essential project files tracked
+# Do not ignore:
+# - requirements.txt
+# - pyproject.toml
+# - uv.lock
+# - package.json and package lockfiles
+# - backend/migrations/
+# - backend/tests/
+# - docs/*.md
+# - .env.example
+/docs/
