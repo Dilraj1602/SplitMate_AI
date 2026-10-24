@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+import backend.app.models  # noqa: F401 — register mapped tables before autogeneration.
 from backend.app.config import settings
 from backend.app.db.session import Base
 
@@ -14,7 +15,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# SQLAlchemy metadata for future model migrations
+# Importing the models package above registers mapped tables on this metadata.
 target_metadata = Base.metadata
 
 

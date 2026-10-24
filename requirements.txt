@@ -18,12 +18,18 @@ anyio==4.15.1
     #   langsmith
     #   starlette
     #   watchfiles
+argon2-cffi==25.1.0
+    # via pwdlib
+argon2-cffi-bindings==26.1.0
+    # via argon2-cffi
 certifi==2026.10.19
     # via
     #   httpcore
     #   httpx
     #   requests
     #   sentry-sdk
+cffi==2.1.1
+    # via argon2-cffi-bindings
 charset-normalizer==3.5.2
     # via requests
 click==8.5.0
@@ -189,6 +195,10 @@ psycopg==3.3.6
     # via splitmateai
 psycopg-binary==3.3.6 ; implementation_name != 'pypy'
     # via psycopg
+pwdlib==0.3.1
+    # via splitmateai
+pycparser==3.12 ; implementation_name != 'PyPy'
+    # via cffi
 pydantic==2.14.1
     # via
     #   fastapi
@@ -212,6 +222,8 @@ pygments==2.21.0
     # via
     #   pytest
     #   rich
+pyjwt==2.15.1
+    # via splitmateai
 pytest==9.1.1
     # via splitmateai
 python-dotenv==1.2.4

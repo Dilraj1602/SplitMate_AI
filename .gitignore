@@ -220,6 +220,11 @@ debug.log
 # - package.json and package lockfiles
 # - backend/migrations/
 # - backend/tests/
-# - docs/*.md
+# - the five approved operational records in docs/ (allowlisted below)
 # - .env.example
-/docs/
+/docs/*
+!/docs/PROJECT_AUDIT.md
+!/docs/IMPLEMENTATION_LOG.md
+!/docs/KNOWN_ISSUES_AND_FIXES.md
+!/docs/PROJECT_DECISIONS.md
+!/docs/TEST_REPORT.md

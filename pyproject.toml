@@ -11,7 +11,13 @@ dependencies = [
     "langgraph>=1.2.16",
     "langsmith>=0.14.12",
     "psycopg[binary]>=3.3.6",
+    "pwdlib[argon2]>=0.3.1",
     "pydantic-settings>=2.16.1",
+    "pyjwt>=2.15.1",
     "pytest>=9.1.1",
     "sqlalchemy>=2.1.6",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["."]
