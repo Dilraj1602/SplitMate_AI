@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AuthProvider } from '../app/auth'
+import { AuthProvider, useAuth } from '../app/auth'
 import { AuthPage, LandingPage } from './AuthPages'
 
 afterEach(() => {
@@ -102,5 +102,29 @@ describe('OTP authentication screens', () => {
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/password-reset/confirm'), expect.objectContaining({
       body: JSON.stringify({ email: 'person@example.com', code: '654321', new_password: 'newpass123' }),
     }))
+  })
+})
+
+function SessionStatus() {
+  const auth = useAuth()
+  return <p>{auth.loading ? 'Loading session' : auth.authenticated ? 'Signed in' : 'Signed out'}</p>
+}
+
+describe('session restoration', () => {
+  it('validates a saved session before exposing authenticated state', async () => {
+    window.sessionStorage.setItem('splitmate_access_token', 'valid-token')
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { id: 'user-1' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    render(<AuthProvider><SessionStatus /></AuthProvider>)
+    expect(await screen.findByText('Signed in')).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/me'), expect.objectContaining({ headers: expect.any(Headers) }))
+  })
+
+  it('clears an expired saved session and completes restoration as signed out', async () => {
+    window.sessionStorage.setItem('splitmate_access_token', 'expired-token')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: 'The access token is invalid or expired.' }), { status: 401, headers: { 'Content-Type': 'application/json' } })))
+    render(<AuthProvider><SessionStatus /></AuthProvider>)
+    expect(await screen.findByText('Signed out')).toBeInTheDocument()
+    expect(window.sessionStorage.getItem('splitmate_access_token')).toBeNull()
   })
 })

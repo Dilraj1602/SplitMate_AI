@@ -51,12 +51,17 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     if (typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'TimeoutError') {
       throw new ApiError('The request timed out. Please try again.')
     }
-    throw new ApiError('Could not reach the SplitMate API. Check that the backend is running.')
+      throw new ApiError('We couldn’t connect. Check your internet connection and try again.')
   }
 
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ApiErrorBody
-    const message = body.error?.message || body.detail || `The request failed (${response.status}).`
+    if (response.status === 401) window.dispatchEvent(new Event('splitmate:unauthorized'))
+    const message = response.status >= 500
+      ? 'We couldn’t complete that request. Please try again.'
+      : response.status === 422 && typeof body.detail !== 'string'
+        ? 'Please check the information and try again.'
+        : body.error?.message || (typeof body.detail === 'string' ? body.detail : undefined) || 'We couldn’t complete that request. Please try again.'
     throw new ApiError(message, response.status, body.error?.code)
   }
   if (response.status === 204) return undefined as T

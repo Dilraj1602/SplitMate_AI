@@ -21,7 +21,7 @@ describe('apiRequest', () => {
   it('reports an unreachable backend clearly', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network failure')))
 
-    await expect(apiRequest('/groups')).rejects.toThrow('Could not reach the SplitMate API')
+    await expect(apiRequest('/groups')).rejects.toThrow('Check your internet connection and try again.')
   })
 
   it('turns request timeouts into a retryable API error', async () => {

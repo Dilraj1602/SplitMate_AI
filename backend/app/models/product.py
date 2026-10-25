@@ -22,9 +22,11 @@ from backend.app.db.session import Base
 
 class Group(Base):
     __tablename__ = "groups"
+    __table_args__ = (UniqueConstraint("created_by_user_id", "normalized_name", name="uq_groups_owner_normalized_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    normalized_name: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(String(500))
     currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)

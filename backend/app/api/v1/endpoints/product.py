@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_DOWN
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -293,15 +293,28 @@ def list_groups(
 
 @router.post("/groups", status_code=status.HTTP_201_CREATED, summary="Create an INR group")
 def create_group(payload: GroupCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    duplicate = db.scalar(select(Group.id).where(
+        Group.created_by_user_id == user.id,
+        func.lower(func.trim(Group.name)) == payload.name.lower(),
+    ))
+    if duplicate:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.")
     group = Group(
-        name=payload.name.strip(), description=payload.description.strip() if payload.description else None,
+        name=payload.name, normalized_name=payload.name.lower(),
+        description=payload.description.strip() if payload.description else None,
         currency=payload.currency, created_by_user_id=user.id,
     )
     db.add(group)
-    db.flush()
-    db.add(Membership(group_id=group.id, user_id=user.id, role="admin", status="active"))
-    _activity(db, group.id, user.id, "group_created", f"{user.display_name or user.username} created {group.name}.", "group", group.id)
-    db.commit()
+    try:
+        db.flush()
+        db.add(Membership(group_id=group.id, user_id=user.id, role="admin", status="active"))
+        _activity(db, group.id, user.id, "group_created", f"{user.display_name or user.username} created {group.name}.", "group", group.id)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "uq_groups_owner_normalized_name" in str(exc.orig).lower() or "unique" in str(exc.orig).lower():
+            raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.") from exc
+        raise
     db.refresh(group)
     return {"data": _serialize_group(db, group)}
 
@@ -317,14 +330,27 @@ def update_group(group_id: UUID, payload: GroupPatch, db: Session = Depends(get_
     _require_admin(db, group_id, user.id)
     group = _group(db, group_id)
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("name") is not None and db.scalar(select(Group.id).where(
+        Group.created_by_user_id == group.created_by_user_id,
+        Group.id != group.id,
+        func.lower(func.trim(Group.name)) == changes["name"].lower(),
+    )):
+        raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.")
     for key, value in changes.items():
         if key == "name" and value is not None:
             value = value.strip()
+            group.normalized_name = value.lower()
         if key == "description" and value is not None:
             value = value.strip()
         setattr(group, key, value)
     group.updated_at = datetime.now(UTC)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "uq_groups_owner_normalized_name" in str(exc.orig).lower() or "unique" in str(exc.orig).lower():
+            raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.") from exc
+        raise
     db.refresh(group)
     return {"data": _serialize_group(db, group)}
 
@@ -352,12 +378,19 @@ def create_invitation(group_id: UUID, payload: InvitationCreate, db: Session = D
     invitee = db.scalar(select(User).where(func.lower(User.email) == email)) if email else db.scalar(select(User).where(func.lower(User.username) == username))
     if invitee and db.scalar(select(Membership).where(Membership.group_id == group_id, Membership.user_id == invitee.id, Membership.status == "active")):
         raise HTTPException(status.HTTP_409_CONFLICT, "This user is already an active group member.")
-    duplicate = db.scalar(select(Invitation).where(
-        Invitation.group_id == group_id, Invitation.status == "pending",
-        Invitation.expires_at > datetime.now(UTC),
-        Invitation.invitee_user_id == (invitee.id if invitee else None),
-        Invitation.invitee_email == (email if not invitee else None),
-        Invitation.invitee_username == (username if not invitee else None),
+    now = datetime.now(UTC)
+    db.query(Invitation).filter(
+        Invitation.group_id == group_id, Invitation.status == "pending", Invitation.expires_at <= now,
+    ).update({Invitation.status: "expired"}, synchronize_session=False)
+    recipient_filter = (
+        or_(Invitation.invitee_user_id == invitee.id, func.lower(Invitation.invitee_email) == email)
+        if invitee and email else
+        Invitation.invitee_user_id == invitee.id if invitee else
+        func.lower(Invitation.invitee_email) == email if email else
+        func.lower(Invitation.invitee_username) == username
+    )
+    duplicate = db.scalar(select(Invitation.id).where(
+        Invitation.group_id == group_id, Invitation.status == "pending", recipient_filter,
     ))
     if duplicate:
         raise HTTPException(status.HTTP_409_CONFLICT, "A pending invitation already exists for this user.")
@@ -366,7 +399,8 @@ def create_invitation(group_id: UUID, payload: InvitationCreate, db: Session = D
     invitation = Invitation(
         group_id=group_id, inviter_user_id=user.id,
         invitee_user_id=invitee.id if invitee else None,
-        invitee_email=email, invitee_username=username,
+        invitee_email=email,
+        invitee_username=username if not invitee else None,
         expires_at=datetime.now(UTC) + timedelta(days=7),
     )
     db.add(invitation)

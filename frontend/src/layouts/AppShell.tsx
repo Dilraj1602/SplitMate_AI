@@ -13,7 +13,6 @@ const mainNav = [
 
 export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false)
-  const [logoutError, setLogoutError] = useState('')
   const auth = useAuth()
   const profile = useQuery({ queryKey: ['profile'], queryFn: ({ signal }) => api.get<{ data: { display_name: string; username: string; email: string } }>('/users/me', signal) })
   const unread = useQuery({ queryKey: ['notification-count'], queryFn: ({ signal }) => api.get<{ data: { unread_count: number } }>('/notifications/unread-count', signal) })
@@ -21,14 +20,11 @@ export function AppShell() {
   const avatar = displayName.slice(0, 1).toUpperCase()
 
   async function signOut() {
-    setLogoutError('')
     try {
       await api.post('/auth/logout')
-      auth.endSession()
-      window.location.assign('/login')
-    } catch {
-      setLogoutError('The session could not be revoked. Try again before closing this page.')
-    }
+    } catch { /* The bearer session is client-held and expires on the server. */ }
+    auth.endSession()
+    window.location.assign('/login')
   }
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -48,7 +44,7 @@ export function AppShell() {
     {menuOpen && <button className="drawer-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
     <div className="workspace">
       <header className="topbar"><button className="icon-button menu-toggle" aria-label="Open navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu size={20} /></button><div className="topbar-context">Shared expenses, made clear.</div><div className="topbar-actions"><NavLink to="/app/notifications" className="icon-button" aria-label={unread.data?.data.unread_count ? `Notifications, ${unread.data.data.unread_count} unread` : 'Notifications'}><Bell size={19} />{Boolean(unread.data?.data.unread_count) && <span className="notification-count">{unread.data?.data.unread_count}</span>}</NavLink><button type="button" className="button button-small button-outline" onClick={signOut}>Sign out</button></div></header>
-      <main id="main-content" className="main-content">{logoutError && <p className="feedback feedback-error" role="alert">{logoutError}</p>}<Outlet /></main>
+      <main id="main-content" className="main-content"><Outlet /></main>
     </div>
   </div>
 }

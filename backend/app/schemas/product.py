@@ -17,11 +17,29 @@ class GroupCreate(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     currency: Literal["INR"] = "INR"
 
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Group name is required.")
+        return value
+
 
 class GroupPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     status: Literal["active", "archived"] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Group name is required.")
+        return value
 
 
 class InvitationCreate(BaseModel):

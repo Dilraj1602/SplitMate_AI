@@ -10,7 +10,8 @@ import {
 } from '../pages/ProductPages'
 
 function RequireSession() {
-  const { authenticated } = useAuth()
+  const { authenticated, loading } = useAuth()
+  if (loading) return <main className="auth-page" aria-live="polite">Restoring your session…</main>
   return authenticated ? <AppShell /> : <Navigate to="/login" replace state={{ returnTo: window.location.pathname }} />
 }
 

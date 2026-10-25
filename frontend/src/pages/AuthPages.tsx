@@ -61,7 +61,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     try {
       if (mode === 'login') {
         const session = await api.post<{ data?: { access_token?: string } }>(current.path, values)
-        if (!session.data?.access_token) throw new ApiError('The API response did not include an access token.')
+        if (!session.data?.access_token) throw new ApiError('We couldn’t sign you in. Please try again.')
         auth.startSession(session.data.access_token)
         navigate('/app')
         return

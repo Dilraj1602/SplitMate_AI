@@ -98,3 +98,62 @@ def test_group_expense_balance_settlement_and_notifications(monkeypatch):
     finally:
         app.dependency_overrides.pop(get_db, None)
         engine.dispose()
+
+
+def test_group_name_and_invitation_lifecycle(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("backend.app.dependencies.settings.secret_key", "test-secret-key-that-is-at-least-32-bytes-long")
+    monkeypatch.setattr("backend.app.services.auth.settings.secret_key", "test-secret-key-that-is-at-least-32-bytes-long")
+
+    def override_db() -> Generator[Session, None, None]:
+        with Session(engine, autoflush=False) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with Session(engine) as session:
+            users = [User(username=name, display_name=name.title(), email=f"{name}@example.com", hashed_password=hash_password("password123"), is_active=True, is_email_verified=True) for name in ("alice", "bob", "carol")]
+            session.add_all(users)
+            session.commit()
+            alice, bob, carol = users
+            alice_token, bob_token, carol_token = (make_access_token(person) for person in users)
+
+        client = TestClient(app)
+        ah = {"Authorization": f"Bearer {alice_token}"}
+        bh = {"Authorization": f"Bearer {bob_token}"}
+        ch = {"Authorization": f"Bearer {carol_token}"}
+        assert client.get("/api/v1/auth/me", headers=ah).status_code == 200
+        assert client.get("/api/v1/auth/me").status_code == 401
+
+        group = client.post("/api/v1/groups", headers=ah, json={"name": "  Weekend  "})
+        assert group.status_code == 201
+        group_id = group.json()["data"]["id"]
+        duplicate = client.post("/api/v1/groups", headers=ah, json={"name": "weekEND"})
+        assert duplicate.status_code == 409
+        # The duplicate scope is the owner; another user can use the same name.
+        assert client.post("/api/v1/groups", headers=bh, json={"name": "Weekend"}).status_code == 201
+
+        created = client.post(f"/api/v1/groups/{group_id}/invitations", headers=ah, json={"email": "bob@example.com"})
+        assert created.status_code == 201
+        invitation_id = created.json()["data"]["id"]
+        assert created.json()["data"]["status"] == "pending"
+        assert client.post(f"/api/v1/groups/{group_id}/invitations", headers=ah, json={"email": "bob@example.com"}).status_code == 409
+        assert client.get("/api/v1/invitations", headers=bh).json()["data"][0]["id"] == invitation_id
+        assert client.post(f"/api/v1/invitations/{invitation_id}/accept", headers=ch).status_code == 404
+        accepted = client.post(f"/api/v1/invitations/{invitation_id}/accept", headers=bh)
+        assert accepted.status_code == 200 and accepted.json()["data"]["status"] == "accepted"
+        assert client.post(f"/api/v1/invitations/{invitation_id}/accept", headers=bh).status_code == 409
+        assert client.get(f"/api/v1/groups/{group_id}/members", headers=bh).status_code == 200
+        with Session(engine) as session:
+            assert session.query(Membership).filter_by(group_id=UUID(group_id), user_id=users[1].id).count() == 1
+
+        declined = client.post(f"/api/v1/groups/{group_id}/invitations", headers=ah, json={"email": "carol@example.com"})
+        assert declined.status_code == 201
+        decline_response = client.post(f"/api/v1/invitations/{declined.json()['data']['id']}/decline", headers=ch)
+        assert decline_response.status_code == 200 and decline_response.json()["data"]["status"] == "declined"
+        assert client.get(f"/api/v1/groups/{group_id}/members", headers=ch).status_code == 404
+        assert client.post(f"/api/v1/groups/{group_id}/invitations", headers=ah, json={"email": "carol@example.com"}).status_code == 201
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()

@@ -1,4 +1,9 @@
 export type SplitMode = 'equal' | 'exact' | 'percentage'
+
+export function localDateForInput(now = new Date()): string {
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+  return local.toISOString().slice(0, 10)
+}
 export type ShareInput = { user_id: string; value?: string }
 export type AllocatedShare = { user_id: string; amount: string }
 

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { allocateShares, formatPaise, parseInrToPaise } from './splitMath'
+import { allocateShares, formatPaise, localDateForInput, parseInrToPaise } from './splitMath'
 
 describe('INR split preview arithmetic', () => {
+  it('formats the selected local calendar day for a date input', () => {
+    const date = new Date(2026, 9, 25, 0, 15)
+    expect(localDateForInput(date)).toBe('2026-10-25')
+  })
+
   it('uses integer paise and deterministic equal-split residuals', () => {
     const shares = allocateShares('10.00', [{ user_id: 'c' }, { user_id: 'a' }, { user_id: 'b' }], 'equal')
 

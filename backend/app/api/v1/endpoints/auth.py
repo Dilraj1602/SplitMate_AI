@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from backend.app.dependencies import get_db
+from backend.app.dependencies import get_current_user, get_db
 from backend.app.config import settings
 from backend.app.models import AuthOtp, User
 from backend.app.schemas.auth import EmailOtpRequest, EmailRequest, LoginRequest, PasswordResetRequest, RegisterRequest
@@ -14,6 +14,11 @@ from backend.app.services.auth import EMAIL_VERIFICATION, PASSWORD_RESET, OtpRat
 from backend.app.services.email import EmailConfigurationError, EmailDeliveryError, send_auth_code
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+@router.get("/me", summary="Restore the signed-in user")
+def current_user(user: User = Depends(get_current_user)):
+    return {"data": {"id": str(user.id), "email": user.email, "username": user.username, "display_name": user.display_name}}
 GENERIC_RESET = {"message": "If an eligible account matches, an email will be sent if delivery succeeds. If no email arrives, try again later."}
 
 
