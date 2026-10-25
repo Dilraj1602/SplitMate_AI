@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -53,6 +54,11 @@ def test_production_settings_do_not_infer_cors_origins() -> None:
     configured = Settings(_env_file=None, environment="production")
 
     assert configured.effective_cors_origins == []
+
+
+def test_development_otp_cannot_be_enabled_in_production() -> None:
+    with pytest.raises(ValidationError, match="only allowed when ENVIRONMENT=development"):
+        Settings(_env_file=None, environment="production", dev_otp_bypass=True, dev_otp_code="444444")
 
 
 def test_request_database_dependency_closes_session(monkeypatch) -> None:

@@ -1,5 +1,16 @@
 # SplitMate AI — Test and Validation Report
 
+## 2026-10-25 — Product API and frontend integration
+
+- **Implementation:** Added persistent product tables and API routes for dashboard, groups, memberships, invitations, invite links/join requests, expenses/splits/history, group balances, settlements, notifications, activity, profile, password change, and logout. Connected the existing React pages to live resource contracts and added dashboard and notification views, account identity and unread count, plus settlement details/actions.
+- **404 diagnosis:** The original API router registered only health/authentication; product screens called endpoints that did not exist. The router now includes the product API module.
+- **Database:** Reviewed additive migration `eff0170fdee4` (product tables/indexes only), applied it after `20261025_01` to the configured development PostgreSQL database, and ran Alembic check: `No new upgrade operations detected.` Existing auth/account records were preserved.
+- **Backend:** `.venv\Scripts\python.exe -m pytest -q backend/tests` — **25 passed**, including group, invite-link approval, equal split, balances, pending/confirmed settlement, notifications, and activity flow against isolated SQLite. `compileall` succeeded.
+- **Frontend:** `npm run build`, `npm run lint`, `npm run typecheck`, and Vitest — **18 tests across 3 files passed**.
+- **Local services:** API health returned 200 at `http://127.0.0.1:8000`; frontend dev server is running at `http://127.0.0.1:5173` and returned 200 after startup.
+- **External email:** No Brevo message was sent. The configured development OTP bypass suppresses provider calls; a prior read-only Brevo credential check returned 401. Real delivery still requires a valid key.
+- **Limits:** Workflow tests use an isolated test database, not browser automation against the configured PostgreSQL account. The UI runs locally, but a full authenticated browser walkthrough was not performed. Group invitation records are in-app; they do not send email.
+
 ## 2026-10-24 — Repository baseline and health tests
 
 - **Scope:** Backend test discovery, app import, health endpoint and OpenAPI schema.
@@ -78,3 +89,23 @@
 - **Frontend tests/checks:** `npm run test -- --reporter=dot` — **15 tests across 3 files passed**; build, lint, and typecheck passed.
 - **Actual account result:** `POST /api/v1/auth/register` remains HTTP 404. No account or database record was created. Email verification is described as required in the provisional project auth policy, but verification endpoint, migration, and email delivery are not implemented/configured.
 - **Security note:** Six characters is a weak password minimum for financial account data. It was implemented at the user's direction; the backend must enforce the same contract and rate-limit auth operations before the route is enabled, and the threshold should be revisited before production.
+
+## 2026-10-25 — Brevo email OTP authentication
+
+- **Implementation:** Added pending account creation, email verification OTP, resend, password-reset OTP, verified-account login, reusable Brevo email templates/service, settings, frontend OTP/reset forms, API/database/architecture documentation, tests, and initial Alembic revision `20261025_01`.
+- **Database safety and migration:** Read-only inspection confirmed `ENVIRONMENT=development`, database `splitmate_ai`, no `users`/`auth_otps` tables, and an empty Alembic version table. Reviewed the generated SQL, applied the additive initial migration to this development database, then `uv run alembic -c backend/alembic.ini check` reported `No new upgrade operations detected.`
+- **Backend:** `uv run pytest -q` — **20 passed**. Tests cover mocked Brevo payload/header, missing configuration, provider failure/timeout, OTP purpose/hash/expiry/attempt/single-use/supersession, and registration/verification/login/reset behavior.
+- **Frontend:** `npm run build`, `npm run lint`, and `npm run typecheck` passed. `npm run test -- --reporter=dot --pool=forks --maxWorkers=1` — **18 passed across 3 files**.
+- **Startup:** Backend started at `http://127.0.0.1:8001`; frontend started at `http://127.0.0.1:5174`. API health and readiness returned 200, OpenAPI contained all six auth routes, frontend returned 200, and CORS preflight from the frontend origin returned 200.
+- **Configuration/provider:** `.env` remains ignored by Git. A local random `SECRET_KEY` was generated and stored in `.env` without printing it. A read-only Brevo account API credential check returned HTTP 401; therefore the configured `BREVO_API_KEY` is not currently accepted. No email was sent and real delivery is unverified. Replace the key with a valid Brevo API key before testing account creation.
+- **Limitations:** Password-reset cannot revoke already-issued stateless access tokens because refresh/session storage does not exist. Current rate limits are per email address and are not an IP/global abuse limiter. No actual concurrent PostgreSQL verification stress test was run; OTP state changes use PostgreSQL row locks and atomic commits.
+
+## 2026-10-25 — Pending registration retry and provider-key diagnosis
+
+- **Issue reproduced from user report:** A first signup creates an inactive, unverified row before attempting delivery. Brevo failure returns 503 while retaining that pending row; a second signup previously returned 409.
+- **Fix:** Repeating the same pending email/username with the matching password now resumes verification, never overwrites the original user fields/password, and does not create another user. A retry inside the OTP cooldown returns the pending-flow response; other duplicate identities still return 409.
+- **Database check:** Confirmed the reported email has one matching pending, inactive, unverified account with matching username; no password, OTP, or hash was displayed. No account data was changed during inspection.
+- **Provider check:** Repeated read-only Brevo account authentication check still returned HTTP 401. The key is non-empty but not accepted. No message was sent; the user supplied a test recipient, but provider authentication failed before any delivery attempt.
+- **UI false-success correction:** The cooldown branch had returned 202 for a pending-account retry even though no send was attempted, which caused the frontend to navigate to OTP entry. It now returns 429 during cooldown; the verification page copy no longer promises that an email was sent. Backend: **21 passed**. Frontend build/lint/typecheck passed; Vitest: **18 passed**.
+- **Local testing mode:** Enabled `DEV_OTP_BYPASS` and a six-digit development code in the ignored `.env`. This mode skips Brevo, stores only the code HMAC in the database, and restricts OTP routes to loopback while retaining purpose/expiry/attempt/single-use checks. Issued a fresh verification OTP for the user's existing pending account through the local resend route; no email was sent. The live API on port 8000 confirmed local development mode is active.
+- **Additional validation:** Backend pytest now passes **24 tests**, including local OTP mode and production guard tests. Frontend build, lint, typecheck, and 18 tests pass. Alembic reports no schema drift.

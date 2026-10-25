@@ -11,20 +11,52 @@ import { allocateShares, type SplitMode } from '../features/expenses/splitMath'
 type PageInfo = { title: string; description: string; endpoint?: string; unavailable?: string }
 type MemberSummary = { user_id: string; username?: string | null; display_name?: string | null; role?: string }
 type InvitationSummary = { id: string; group_name?: string; inviter_name?: string; status: string; expires_at?: string }
-type SettlementSummary = { id: string; payer_name?: string; recipient_name?: string; amount: string; currency: string; status: string }
+type SettlementSummary = { id: string; group_id: string; payer_user_id: string; recipient_user_id: string; payer_name?: string; recipient_name?: string; amount: string; currency: string; status: string }
+type NotificationSummary = { id: string; type: string; title: string; body: string; is_read: boolean; created_at: string; group_id?: string | null }
+type DashboardData = { data: Array<{ id: string; description: string; total_amount: string; currency: string; expense_date: string }>; summary: { groups_count: number; expense_count: number; total_owed_by_you: string; total_owed_to_you: string; currency: string }; groups: GroupSummary[] }
 
 const pathConfig: Record<string, PageInfo> = {
   '/app': { title: 'Your overview', description: 'A clear view of the groups and activity you can access.', endpoint: '/dashboard' },
   '/app/groups': { title: 'Groups', description: 'Shared spaces for trips, homes, and everyday plans.', endpoint: '/groups' },
-  '/app/activity': { title: 'Activity', description: 'A record of changes across the groups you belong to.' },
+  '/app/activity': { title: 'Activity', description: 'A record of changes across the groups you belong to.', endpoint: '/activity' },
   '/app/notifications': { title: 'Notifications', description: 'Updates about invitations, expenses, and settlements.', endpoint: '/notifications' },
   '/app/invitations': { title: 'Invitations', description: 'Review invitations addressed to your account.', endpoint: '/invitations' },
 }
 
-export function OverviewPage() { return <ResourcePage info={pathConfig['/app']} /> }
+export function OverviewPage() {
+  const query = useQuery({ queryKey: ['dashboard'], queryFn: ({ signal }) => api.get<DashboardData>('/dashboard', signal) })
+  return <><PageHeader title="Your overview" description="A clear view of your groups, expenses, and current balances." />
+    {query.isPending ? <LoadingState label="Loading your dashboard" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : <>
+      <section className="dashboard-stats" aria-label="Expense summary">
+        <article className="panel"><small>Groups</small><strong>{query.data.summary.groups_count}</strong></article>
+        <article className="panel"><small>Expenses</small><strong>{query.data.summary.expense_count}</strong></article>
+        <article className="panel"><small>You owe</small><strong>{query.data.summary.currency} {query.data.summary.total_owed_by_you}</strong></article>
+        <article className="panel"><small>Owed to you</small><strong>{query.data.summary.currency} {query.data.summary.total_owed_to_you}</strong></article>
+      </section>
+      <div className="split-section section-gap"><section className="panel"><h2>Your groups</h2>{query.data.groups.length ? <div className="resource-list">{query.data.groups.map(group => <Link className="resource-row" key={group.id} to={`/app/groups/${group.id}`}><span className="row-copy"><strong>{group.name}</strong><small>{group.member_count} members · {group.status}</small></span><ArrowRight size={16} /></Link>)}</div> : <EmptyState title="No groups yet">Create a group to start sharing expenses.</EmptyState>}</section>
+        <section className="panel"><h2>Recent expenses</h2>{query.data.data.length ? <div className="resource-list">{query.data.data.map(expense => <div className="resource-row" key={expense.id}><span className="row-copy"><strong>{expense.description}</strong><small>{expense.expense_date}</small></span><strong className="tabular-amount">{expense.currency} {expense.total_amount}</strong></div>)}</div> : <EmptyState title="No expenses yet">Expenses from your groups will appear here.</EmptyState>}</section></div>
+    </>}
+  </>
+}
 export function GroupsPage() { return <GroupsListPage /> }
 export function ActivityPage() { return <ResourcePage info={pathConfig['/app/activity']} /> }
-export function NotificationsPage() { return <ResourcePage info={pathConfig['/app/notifications']} /> }
+export function NotificationsPage() {
+  const queryClient = useQueryClient()
+  const query = useQuery({ queryKey: ['notifications'], queryFn: ({ signal }) => api.get<Collection<NotificationSummary>>('/notifications', signal) })
+  const unread = useQuery({ queryKey: ['notification-count'], queryFn: ({ signal }) => api.get<{ data: { unread_count: number } }>('/notifications/unread-count', signal) })
+  const [error, setError] = useState('')
+  async function markRead(id?: string) {
+    setError('')
+    try {
+      await api.post(id ? `/notifications/${id}/read` : '/notifications/read-all')
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ['notifications'] }), queryClient.invalidateQueries({ queryKey: ['notification-count'] })])
+    } catch (cause) { setError(messageFor(cause)) }
+  }
+  return <><PageHeader title="Notifications" description="Updates about invitations, expenses, and settlements." action={unread.data?.data.unread_count ? <button className="button button-outline" onClick={() => void markRead()}>Mark all read</button> : undefined} />
+    {error && <ErrorState message={error} />}
+    {query.isPending ? <LoadingState label="Loading notifications" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No notifications">Updates about your groups will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(item => <article className="resource-row resource-row-wrap" key={item.id}><span className="row-copy"><strong>{item.title}</strong><small>{item.body} · {new Date(item.created_at).toLocaleString()}</small></span>{!item.is_read && <button className="button button-small button-outline" onClick={() => void markRead(item.id)}>Mark read</button>}</article>)}</div>}
+  </>
+}
 export function InvitationsPage() {
   const query = useQuery({ queryKey: ['invitations'], queryFn: ({ signal }) => api.get<Collection<InvitationSummary>>('/invitations', signal) })
   return <><PageHeader title="Invitations" description="Review group invitations addressed to your account." />
@@ -38,7 +70,7 @@ export function GroupPage() {
   if (query.isPending) return <LoadingState label="Loading group" />
   if (query.isError) return <><PageHeader title="Group" description="Group details are available to active members." /><ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /></>
   const group = query.data.data
-  return <><PageHeader eyebrow="Groups" title={group.name} description={group.description || 'Group overview'} action={<Link className="button button-primary" to={`/app/groups/${groupId}/expenses/new`}><Plus size={16} />Add expense</Link>} /><GroupTabs groupId={groupId} /><Notice>This group view uses live API data. Financial totals will appear when the balances endpoint is connected.</Notice><div className="split-section"><section className="panel"><h2>Recent expenses</h2><ResourceRows endpoint={`/groups/${groupId}/expenses?limit=5`} emptyTitle="No expenses yet" emptyText="Expenses added to this group will appear here." /></section><section className="panel"><h2>Group summary</h2><p className="muted-copy">{group.member_count ?? '—'} active members</p><Link className="inline-link" to={`/app/groups/${groupId}/balances`}>View balances <ArrowRight size={15} /></Link></section></div></>
+  return <><PageHeader eyebrow="Groups" title={group.name} description={group.description || 'Group overview'} action={<Link className="button button-primary" to={`/app/groups/${groupId}/expenses/new`}><Plus size={16} />Add expense</Link>} /><GroupTabs groupId={groupId} /><div className="split-section"><section className="panel"><h2>Recent expenses</h2><ResourceRows endpoint={`/groups/${groupId}/expenses?limit=5`} emptyTitle="No expenses yet" emptyText="Expenses added to this group will appear here." /></section><section className="panel"><h2>Group summary</h2><p className="muted-copy">{group.member_count ?? '—'} active members</p><Link className="inline-link" to={`/app/groups/${groupId}/balances`}>View balances <ArrowRight size={15} /></Link></section></div></>
 }
 
 export function GroupCreatePage() { return <MutationPage title="Create a group" description="Groups use INR in the initial release. Currency conversion is not supported." endpoint="/groups" fields={[{ name: 'name', label: 'Group name', required: true }, { name: 'description', label: 'Description', required: false }, { name: 'currency', label: 'Currency', type: 'text', value: 'INR', readOnly: true, required: true }]} submit="Create group" /> }
@@ -62,16 +94,23 @@ export function SettlementsPage() {
     {query.isPending ? <LoadingState label="Loading settlements" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No settlements yet">Recorded payments will appear here with their confirmation status.</EmptyState> : <div className="resource-list">{query.data.data.map(item => <SettlementRow key={item.id} item={item} groupId={groupId} />)}</div>}
   </>
 }
-export function PersonalSettlementsPage() { return <ResourcePage info={{ title: 'Settlements', description: 'Choose a group to review proposed and confirmed payments.' }} /> }
+export function PersonalSettlementsPage() {
+  const query = useQuery({ queryKey: ['settlements', 'personal'], queryFn: ({ signal }) => api.get<Collection<SettlementSummary>>('/settlements', signal) })
+  return <><PageHeader title="Settlements" description="Proposed and confirmed payments across your groups." />{query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No settlements yet">Proposed payments across your groups will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(item => <div key={item.id}><SettlementRow item={item} groupId={item.group_id} /><Link className="inline-link settlement-detail-link" to={`/app/settlements/${item.id}`}>View details <ArrowRight size={14} /></Link></div>)}</div>}</>
+}
 export function SettlementCreatePage() { const { groupId = '' } = useParams(); return <MutationPage title="Record a settlement" description="This records a proposed payment. It does not move money or reduce balances until the recipient confirms." endpoint={`/groups/${groupId}/settlements`} fields={[{ name: 'recipient_user_id', label: 'Recipient user ID', required: true }, { name: 'amount', label: 'Amount (INR)', inputMode: 'decimal', required: true }, { name: 'currency', label: 'Currency', value: 'INR', readOnly: true, required: true }]} submit="Record proposed settlement" idempotent /> }
-export function SettlementDetailPage() { return <ResourcePage info={{ title: 'Settlement details', description: 'The current contract exposes settlements through the group settlement list; a separate detail endpoint is not defined.' }} /> }
+export function SettlementDetailPage() {
+  const { settlementId = '' } = useParams()
+  const query = useQuery({ queryKey: ['settlement', settlementId], queryFn: ({ signal }) => api.get<{ data: SettlementSummary }>(`/settlements/${settlementId}`, signal), enabled: Boolean(settlementId) })
+  return <><PageHeader title="Settlement details" description="Settlement status and participants." />{query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : <div className="resource-list"><SettlementRow item={query.data.data} groupId={query.data.data.group_id} /></div>}</>
+}
 export function InvitePreviewPage() { return <InvitePreview /> }
 export function ExpensesPage() { const { groupId = '' } = useParams(); return <ResourcePage info={{ title: 'Expenses', description: 'Expenses and their splits, as returned by the group API.', endpoint: `/groups/${groupId}/expenses` }} tabs={<GroupTabs groupId={groupId} />} action={<Link className="button button-primary" to={`/app/groups/${groupId}/expenses/new`}><Plus size={16} />Add expense</Link>} /> }
 export function ExpenseCreatePage() { const { groupId = '' } = useParams(); return <ExpenseEditor groupId={groupId} /> }
 export function ExpenseEditPage() { const { expenseId = '' } = useParams(); return <MutationPage title="Edit expense" description="Changes will be validated and saved by the backend." endpoint={`/expenses/${expenseId}`} method="patch" fields={[{ name: 'description', label: 'Description', required: true }, { name: 'total_amount', label: 'Total amount', inputMode: 'decimal', required: true }]} submit="Save changes" /> }
 export function ExpenseDetailPage() { const { expenseId = '' } = useParams(); return <ExpenseDetail expenseId={expenseId} /> }
 export function ExpenseHistoryPage() { const { expenseId = '' } = useParams(); return <ResourcePage info={{ title: 'Expense history', description: 'Audited changes for this expense.', endpoint: `/expenses/${expenseId}/history` }} /> }
-export function PersonalBalancesPage() { return <ResourcePage info={{ title: 'Your balances', description: 'Your net position, separated by currency.', endpoint: '/dashboard' }} /> }
+export function PersonalBalancesPage() { return <ResourcePage info={{ title: 'Your balances', description: 'Your net position in each group, with currencies kept separate.', endpoint: '/balances' }} /> }
 export function ProfilePage() { return <MutationPage title="Profile" description="View and update the profile fields allowed by your account." endpoint="/users/me" method="patch" fields={[{ name: 'display_name', label: 'Display name', required: false }]} submit="Save profile" /> }
 export function SecurityPage() { return <MutationPage title="Security settings" description="Change your password and review active sessions when the security API is available." endpoint="/auth/change-password" fields={[{ name: 'current_password', label: 'Current password', type: 'password', required: true }, { name: 'new_password', label: 'New password', type: 'password', required: true }, { name: 'confirm_password', label: 'Confirm new password', type: 'password', required: true }]} submit="Update password" /> }
 function InvitePreview() {
@@ -169,14 +208,18 @@ function SettlementRow({ item, groupId }: { item: SettlementSummary; groupId: st
   const [error, setError] = useState('')
   const [status, setStatus] = useState(item.status)
   const queryClient = useQueryClient()
+  const profile = useQuery({ queryKey: ['profile'], queryFn: ({ signal }) => api.get<{ data: { id: string } }>('/users/me', signal) })
   async function respond(action: 'confirm' | 'reject' | 'cancel') {
     if (action === 'confirm' && !window.confirm(`Confirm ${item.currency} ${item.amount} from ${item.payer_name || 'the payer'} to ${item.recipient_name || 'the recipient'}?`)) return
     setBusy(true); setError('')
-    try { await api.post(`/settlements/${item.id}/${action}`); setStatus(action === 'confirm' ? 'confirmed' : action === 'reject' ? 'rejected' : 'cancelled'); await queryClient.invalidateQueries({ queryKey: ['settlements', groupId] }); await queryClient.invalidateQueries({ queryKey: ['resource', `/groups/${groupId}/balances`] }) }
+    try { await api.post(`/settlements/${item.id}/${action}`); setStatus(action === 'confirm' ? 'confirmed' : action === 'reject' ? 'rejected' : 'cancelled'); await queryClient.invalidateQueries({ queryKey: ['settlements'] }); await queryClient.invalidateQueries({ queryKey: ['settlement', item.id] }); await queryClient.invalidateQueries({ queryKey: ['dashboard'] }); await queryClient.invalidateQueries({ queryKey: ['resource', `/groups/${groupId}/balances`] }) }
     catch (cause) { setError(messageFor(cause)) }
     finally { setBusy(false) }
   }
-  return <article className="resource-row resource-row-wrap"><span className="row-copy"><strong>{item.payer_name || 'Payer'} → {item.recipient_name || 'Recipient'}</strong><small>{item.status} · {item.currency} {item.amount}</small>{error && <small className="inline-error">{error}</small>}</span>{status === 'pending' && <span className="row-actions"><button className="button button-small button-primary" disabled={busy} onClick={() => respond('confirm')}>Confirm</button><button className="button button-small button-outline" disabled={busy} onClick={() => respond('reject')}>Reject</button></span>}</article>
+  const currentUserId = profile.data?.data.id
+  const recipient = currentUserId === item.recipient_user_id
+  const creator = currentUserId === item.payer_user_id
+  return <article className="resource-row resource-row-wrap"><span className="row-copy"><strong>{item.payer_name || 'Payer'} → {item.recipient_name || 'Recipient'}</strong><small>{item.status} · {item.currency} {item.amount}</small>{error && <small className="inline-error">{error}</small>}</span>{status === 'pending' && (recipient || creator) && <span className="row-actions">{recipient && <><button className="button button-small button-primary" disabled={busy} onClick={() => respond('confirm')}>Confirm</button><button className="button button-small button-outline" disabled={busy} onClick={() => respond('reject')}>Reject</button></>}{creator && <button className="button button-small button-outline" disabled={busy} onClick={() => respond('cancel')}>Cancel</button>}</span>}</article>
 }
 
 function InviteLinkCreator({ groupId }: { groupId: string }) {
@@ -240,6 +283,7 @@ function ExpenseEditor({ groupId }: { groupId: string }) {
         paid_by_user_id: payerId,
         split_type: splitMode,
         splits: shares,
+        percentages: splitMode === 'percentage' ? selected.map(user_id => ({ user_id, value: values[user_id] })) : undefined,
         idempotency_key: crypto.randomUUID(),
       })
       setSaved(true)

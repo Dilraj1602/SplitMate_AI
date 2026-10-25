@@ -1,15 +1,17 @@
 # SplitMate AI
 
-SplitMate AI is an expense-sharing application in active development. The repository currently contains a React/TypeScript frontend scaffold and a FastAPI backend foundation. Product workflows such as authentication, groups, invitations, expenses, balances, and settlements are not yet implemented end to end.
+SplitMate AI is an expense-sharing application in active development. Its FastAPI backend and React frontend now integrate email OTP authentication, groups and invitations, expenses and splits, balances, settlements, notifications, activity, and profile settings.
 
 ## Current status
 
-- Frontend: Vite development/build setup, responsive screens and routes, API client, and deterministic client-side INR split preview.
-- Backend: FastAPI liveness/readiness endpoints, environment-based configuration, SQLAlchemy session setup, PostgreSQL connectivity, and versioned API health route.
-- Database: SQLAlchemy `User` model and Alembic environment are present. There are currently no migration revisions. Do not run a migration against a database until a reviewed revision exists.
-- Tests: backend pytest suite and frontend Vitest suite cover the current foundation; they do not validate complete product workflows.
+- Frontend: Vite app with authenticated screens wired to the API and INR split preview.
+- Backend: FastAPI routes for auth and current product workflows, PostgreSQL persistence, Argon2 password hashing, and short-lived bearer access tokens.
+- Database: SQLAlchemy auth and product models. Alembic revisions `20261025_01` and `eff0170fdee4` are applied to the configured development database.
+- Tests: backend pytest and frontend Vitest include auth and group/expense/balance/settlement workflows; these are API tests against an isolated SQLite database, not browser-to-PostgreSQL tests.
 
 See [the project audit](docs/PROJECT_AUDIT.md), [implementation log](docs/IMPLEMENTATION_LOG.md), [project decisions](docs/PROJECT_DECISIONS.md), [known issues](docs/KNOWN_ISSUES_AND_FIXES.md), and [test report](docs/TEST_REPORT.md) for verified status and open decisions. Product and architecture specifications are also in `docs/`.
+
+Auth details: [API documentation](docs/API_DOCUMENTATION.md), [database design](docs/DATABASE_DESIGN.md), [backend architecture](docs/BACKEND_ARCHITECTURE.md), [frontend architecture](docs/FRONTEND_ARCHITECTURE.md).
 
 ## Requirements
 
@@ -38,6 +40,12 @@ postgresql+psycopg://<user>:<password>@localhost:5432/<database>
 ```
 
 `DATABASE_URL` is optional for starting the database-independent API liveness endpoint. `/ready` returns HTTP 503 until PostgreSQL is configured and reachable. Development allows the local Vite origins (`localhost:5173` and `127.0.0.1:5173`) by default. `CORS_ORIGINS` overrides this with a comma-separated list of exact origins; set production origins explicitly.
+
+Set a random `SECRET_KEY` of at least 32 characters in `.env`. Brevo settings are `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, and `BREVO_SENDER_NAME`; the sender must be verified in Brevo. Never put provider credentials in frontend environment variables. For local exploration only, `DEV_OTP_BYPASS=true` plus six-digit `DEV_OTP_CODE` suppresses email and accepts that code only for a normally issued, valid OTP from loopback. Disable this mode after testing; application configuration rejects it outside `ENVIRONMENT=development`.
+
+```powershell
+uv run alembic -c backend/alembic.ini upgrade head
+```
 
 Install frontend dependencies:
 
@@ -84,11 +92,11 @@ npm run typecheck
 npm run test
 ```
 
-These checks validate the implemented scaffold and foundation only. They are not end-to-end application tests.
+The backend suite covers auth and product workflows with mocked email delivery and isolated databases. These checks are not browser-to-PostgreSQL end-to-end tests. Real Brevo inbox delivery requires an accepted API key and a controlled recipient.
 
 ## Database safety
 
-The configured development database has been checked with read-only queries. Alembic currently detects the model's missing table/indexes, and there are no migration revisions yet. No schema migration is ready to apply. Do not use `create_all`, reset the database, or apply schema changes to an existing database as a substitute for a reviewed migration.
+The configured development database was checked before applying the additive product migration `eff0170fdee4`; Alembic reports no schema drift. Do not use `create_all`, reset the database, or skip migration review in other environments.
 
 ## Repository layout
 

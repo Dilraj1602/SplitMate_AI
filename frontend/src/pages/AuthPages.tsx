@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type InputHTMLAttributes } from 'react'
+import { useEffect, useState, type FormEvent, type InputHTMLAttributes } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Eye, EyeOff } from 'lucide-react'
 import { api, ApiError } from '../services/api'
@@ -10,9 +10,9 @@ type AuthMode = 'login' | 'register' | 'forgot' | 'reset' | 'verify'
 const copy: Record<AuthMode, { title: string; note: string; submit: string; path: string }> = {
   login: { title: 'Welcome back', note: 'Sign in to pick up where you left off.', submit: 'Sign in', path: '/auth/login' },
   register: { title: 'Create your account', note: 'Start organizing shared expenses with your group.', submit: 'Create account', path: '/auth/register' },
-  forgot: { title: 'Reset your password', note: 'We’ll send reset instructions if an account matches that email.', submit: 'Send instructions', path: '/auth/forgot-password' },
-  reset: { title: 'Choose a new password', note: 'Use a strong password you do not use elsewhere.', submit: 'Update password', path: '/auth/reset-password' },
-  verify: { title: 'Verify your email', note: 'Open the verification link from your email, or enter its one-time token below.', submit: 'Verify email', path: '/auth/verify-email' },
+  forgot: { title: 'Reset your password', note: 'We’ll send a code if an account matches that email.', submit: 'Send reset code', path: '/auth/password-reset/request' },
+  reset: { title: 'Choose a new password', note: 'Enter the code from your email and choose a new password.', submit: 'Update password', path: '/auth/password-reset/confirm' },
+  verify: { title: 'Verify your email', note: 'Enter the six-digit code if it arrived. Check spam, then request another code if needed.', submit: 'Verify email', path: '/auth/verify-email' },
 }
 
 export function AuthPage({ mode }: { mode: AuthMode }) {
@@ -21,9 +21,27 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [params] = useSearchParams()
+  const [cooldown, setCooldown] = useState(() => params.get('email') && (mode === 'verify' || mode === 'reset') ? 60 : 0)
   const navigate = useNavigate()
   const auth = useAuth()
   const current = copy[mode]
+  useEffect(() => {
+    if (!cooldown) return
+    const timer = window.setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000)
+    return () => window.clearTimeout(timer)
+  }, [cooldown])
+
+  async function resendCode() {
+    const email = String(params.get('email') || '')
+    if (!email || busy || cooldown) return
+    setError(''); setNotice(''); setBusy(true)
+    try {
+      await api.post(mode === 'verify' ? '/auth/resend-verification' : '/auth/password-reset/request', { email })
+      setNotice(mode === 'verify' ? 'If an unverified account matches that email, a code will be sent.' : 'If an eligible account matches that email, reset instructions will be sent.')
+      setCooldown(60)
+    } catch (cause) { setError(cause instanceof ApiError ? cause.message : 'The request could not be completed.') }
+    finally { setBusy(false) }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -51,27 +69,22 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       const payload = mode === 'register'
         ? { display_name: values.name, username: values.username, email: values.email, password: values.password }
         : mode === 'verify'
-          ? { token: values.token }
+        ? { email: values.email, code: values.code }
         : mode === 'reset'
-          ? { token: values.token, new_password: values.password }
+          ? { email: values.email, code: values.code, new_password: values.password }
             : values
       await api.post(current.path, payload)
       if (mode === 'register') {
-        setNotice('Account request accepted. Check your email to continue.')
-        navigate('/verify-email')
+        navigate(`/verify-email?email=${encodeURIComponent(String(values.email))}`)
       } else if (mode === 'forgot') {
-        setNotice('If an account matches that email, reset instructions have been sent.')
+        navigate(`/reset-password?email=${encodeURIComponent(String(values.email))}`)
       } else if (mode === 'verify') {
-        setNotice('Email verification request accepted. You can sign in when verification is complete.')
+        setNotice('Email verified. You can sign in now.')
       } else {
         setNotice('Password update request accepted. Sign in with your new password.')
       }
     } catch (cause) {
-      if (cause instanceof ApiError && mode === 'register' && cause.status === 404) {
-        setError('Account creation is not available yet because the backend registration endpoint is not implemented.')
-      } else {
-        setError(cause instanceof ApiError ? cause.message : 'The request could not be completed.')
-      }
+      setError(cause instanceof ApiError ? cause.message : 'The request could not be completed.')
     } finally {
       setBusy(false)
     }
@@ -85,15 +98,15 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         {mode === 'register' && <Field name="name" label="Full name" autoComplete="name" required />}
         {mode === 'register' && <Field name="username" label="Username" autoComplete="username" required hint="Used by group members to find you." />}
         {(mode === 'login' || mode === 'register' || mode === 'forgot') && <Field name="email" label="Email address" type="email" autoComplete="email" required />}
-        {mode === 'verify' && <Field name="token" label="One-time verification token" required defaultValue={params.get('token') || ''} />}
-        {mode === 'reset' && <Field name="token" label="Reset token" required defaultValue={params.get('token') || ''} />}
+        {(mode === 'verify' || mode === 'reset') && <Field name="email" label="Email address" type="email" autoComplete="email" required defaultValue={params.get('email') || ''} />}
+        {(mode === 'verify' || mode === 'reset') && <Field name="code" label="Six-digit code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" required />}
         {(mode === 'login' || mode === 'register' || mode === 'reset') && <div className="field-wrap"><div className="field-label-row"><label htmlFor="password">{mode === 'reset' ? 'New password' : 'Password'}</label>{mode === 'login' && <Link to="/forgot-password" className="text-button">Forgot password?</Link>}</div><div className="password-control"><input id="password" name="password" type={visible ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'login' ? undefined : 6} required aria-describedby="password-hint" /><button type="button" className="password-toggle" onClick={() => setVisible(!visible)} aria-label={visible ? 'Hide password' : 'Show password'}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></div>{mode !== 'login' && <small id="password-hint" className="field-hint">Use at least 6 characters.</small>}</div>}
         {(mode === 'register' || mode === 'reset') && <Field name="confirm_password" label="Confirm password" type={visible ? 'text' : 'password'} autoComplete="new-password" required />}
         {error && <ErrorState message={error} />}{notice && <Notice>{notice}</Notice>}
         <button className="button button-primary button-full" disabled={busy}>{busy ? 'Please wait…' : current.submit}</button>
       </form>
+      {(mode === 'verify' || mode === 'reset') && <button type="button" className="text-button" disabled={busy || cooldown > 0} onClick={resendCode}>{cooldown ? `Resend available in ${cooldown}s` : 'Resend code'}</button>}
       <div className="auth-switch">{mode === 'login' ? <>New to SplitMate? <Link to="/signup">Create an account</Link></> : mode === 'register' ? <>Already have an account? <Link to="/login">Sign in</Link></> : <Link to="/login">Return to sign in</Link>}</div>
-      {mode === 'register' && <p className="auth-contract-note">The backend is not connected yet; a failed request will not create an account.</p>}
     </section>
     <p className="auth-footnote">Your financial records stay private to your groups.</p>
   </main>

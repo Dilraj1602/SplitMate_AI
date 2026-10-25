@@ -27,11 +27,12 @@ describe('LandingPage', () => {
 })
 
 describe('AuthPage registration feedback', () => {
-  it('stops pending and explains when registration API is missing', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
-      JSON.stringify({ detail: 'Not Found' }),
-      { status: 404, headers: { 'Content-Type': 'application/json' } },
-    )))
+  it('submits registration through the authentication API', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: 'Registration started.' }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetch)
     const user = userEvent.setup()
 
     render(<MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>)
@@ -43,8 +44,9 @@ describe('AuthPage registration feedback', () => {
     await user.type(screen.getByLabelText('Confirm password'), 'abcdef')
     await user.click(screen.getByRole('button', { name: 'Create account' }))
 
-    expect(await screen.findByText(/backend registration endpoint is not implemented/i)).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Create account' })).toBeEnabled())
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    expect(fetch.mock.calls[0][0]).toContain('/api/v1/auth/register')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ display_name: 'Test Person', username: 'testperson', email: 'test@example.com', password: 'abcdef' })
   })
 
   it('requires six characters and does not call the API for shorter passwords', async () => {
@@ -63,5 +65,42 @@ describe('AuthPage registration feedback', () => {
 
     expect(screen.getByText('Password must be at least 6 characters.')).toBeInTheDocument()
     expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('OTP authentication screens', () => {
+  it('submits the email and six-digit verification code without persisting it', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'Email verified.' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    render(<MemoryRouter initialEntries={['/verify-email?email=person%40example.com']}><AuthProvider><AuthPage mode="verify" /></AuthProvider></MemoryRouter>)
+    await user.type(screen.getByLabelText('Six-digit code'), '123456')
+    await user.click(screen.getByRole('button', { name: 'Verify email' }))
+    expect(await screen.findByText('Email verified. You can sign in now.')).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/verify-email'), expect.objectContaining({
+      body: JSON.stringify({ email: 'person@example.com', code: '123456' }),
+    }))
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('shows a resend cooldown after a code was issued', () => {
+    render(<MemoryRouter initialEntries={['/verify-email?email=person%40example.com']}><AuthProvider><AuthPage mode="verify" /></AuthProvider></MemoryRouter>)
+    expect(screen.getByRole('button', { name: /resend available in 60s/i })).toBeDisabled()
+  })
+
+  it('submits a reset code and new password to the password-reset endpoint', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'Password updated.' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    render(<MemoryRouter initialEntries={['/reset-password?email=person%40example.com']}><AuthProvider><AuthPage mode="reset" /></AuthProvider></MemoryRouter>)
+    await user.type(screen.getByLabelText('Six-digit code'), '654321')
+    await user.type(screen.getByLabelText('New password'), 'newpass123')
+    await user.type(screen.getByLabelText('Confirm password'), 'newpass123')
+    await user.click(screen.getByRole('button', { name: 'Update password' }))
+    expect(await screen.findByText('Password update request accepted. Sign in with your new password.')).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/password-reset/confirm'), expect.objectContaining({
+      body: JSON.stringify({ email: 'person@example.com', code: '654321', new_password: 'newpass123' }),
+    }))
   })
 })

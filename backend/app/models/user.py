@@ -24,6 +24,8 @@ class User(Base):
         nullable=False,
     )
 
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+
     email: Mapped[str] = mapped_column(
         String(255),
         unique=True,
