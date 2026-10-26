@@ -242,6 +242,34 @@ def _group_net_balances(db: Session, group_id: UUID) -> dict[UUID, Decimal]:
     return balances
 
 
+def _pairwise_outstanding(db: Session, group_id: UUID, debtor_id: UUID, creditor_id: UUID) -> tuple[Decimal, Decimal]:
+    """Return confirmed debt and already-pending proposals for one debtor/creditor pair."""
+    confirmed_debt = ZERO
+    expenses = db.scalars(select(Expense).where(Expense.group_id == group_id, Expense.status == "active")).all()
+    for expense in expenses:
+        splits = db.scalars(select(ExpenseSplit).where(ExpenseSplit.expense_id == expense.id)).all()
+        for split in splits:
+            if split.user_id == debtor_id and expense.paid_by_user_id == creditor_id:
+                confirmed_debt += split.amount
+            elif split.user_id == creditor_id and expense.paid_by_user_id == debtor_id:
+                confirmed_debt -= split.amount
+    settlements = db.scalars(select(Settlement).where(
+        Settlement.group_id == group_id,
+        Settlement.status.in_(["confirmed", "pending"]),
+        or_(
+            (Settlement.payer_user_id == debtor_id) & (Settlement.recipient_user_id == creditor_id),
+            (Settlement.payer_user_id == creditor_id) & (Settlement.recipient_user_id == debtor_id),
+        ),
+    )).all()
+    pending_reservations = ZERO
+    for item in settlements:
+        if item.status == "confirmed":
+            confirmed_debt += -item.amount if item.payer_user_id == debtor_id else item.amount
+        elif item.payer_user_id == debtor_id and item.recipient_user_id == creditor_id:
+            pending_reservations += item.amount
+    return max(ZERO, confirmed_debt), pending_reservations
+
+
 @router.get("/dashboard", summary="Get the signed-in user's dashboard")
 def dashboard(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     groups = db.scalars(
@@ -257,13 +285,13 @@ def dashboard(db: Session = Depends(get_db), user: User = Depends(get_current_us
         owed_by_you += abs(min(user_group_balance, ZERO))
         owed_to_you += max(user_group_balance, ZERO)
     recent = db.scalars(
-        select(Expense).join(Membership, Membership.group_id == Expense.group_id)
-        .where(Membership.user_id == user.id, Membership.status == "active", Expense.status == "active")
+        select(Expense).join(Membership, Membership.group_id == Expense.group_id).join(Group, Group.id == Expense.group_id)
+        .where(Membership.user_id == user.id, Membership.status == "active", Group.status == "active", Expense.status == "active")
         .order_by(Expense.expense_date.desc(), Expense.created_at.desc()).limit(8)
     ).all()
     expense_count = db.scalar(
-        select(func.count()).select_from(Expense).join(Membership, Membership.group_id == Expense.group_id)
-        .where(Membership.user_id == user.id, Membership.status == "active", Expense.status == "active")
+        select(func.count()).select_from(Expense).join(Membership, Membership.group_id == Expense.group_id).join(Group, Group.id == Expense.group_id)
+        .where(Membership.user_id == user.id, Membership.status == "active", Group.status == "active", Expense.status == "active")
     ) or 0
     summary = {
         "groups_count": len(groups), "expense_count": expense_count,
@@ -574,6 +602,26 @@ def list_expenses(group_id: UUID, limit: int = Query(default=20, ge=1, le=100), 
     return _collection([_serialize_expense(db, item) for item in items], total, limit, offset)
 
 
+@router.get("/expenses", summary="List active expenses in the signed-in user's groups")
+def list_all_expenses(limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    query = (
+        select(Expense, Group.name.label("group_name"))
+        .join(Group, Group.id == Expense.group_id)
+        .join(Membership, Membership.group_id == Group.id)
+        .where(
+            Membership.user_id == user.id,
+            Membership.status == "active",
+            Group.status == "active",
+            Expense.status == "active",
+        )
+        .order_by(Expense.expense_date.desc(), Expense.created_at.desc())
+    )
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(query.limit(limit).offset(offset)).all()
+    items = [{**_serialize_expense(db, expense), "group_name": group_name} for expense, group_name in rows]
+    return _collection(items, total, limit, offset)
+
+
 @router.post("/groups/{group_id}/expenses", status_code=status.HTTP_201_CREATED, summary="Create an expense with validated splits")
 def create_expense(group_id: UUID, payload: ExpenseCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _require_active_group(db, group_id)
@@ -708,6 +756,29 @@ def list_settlements(group_id: UUID, db: Session = Depends(get_db), user: User =
     return {"data": [_serialize_settlement(db, item) for item in items]}
 
 
+@router.get("/groups/{group_id}/settlement-options", summary="List members the signed-in user can settle with")
+def settlement_options(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _membership(db, group_id, user.id)
+    group = _group(db, group_id)
+    members = db.execute(
+        select(User, Membership).join(Membership, Membership.user_id == User.id)
+        .where(Membership.group_id == group_id, Membership.status == "active", User.id != user.id)
+        .order_by(User.display_name, User.username)
+    ).all()
+    options = []
+    for person, _membership_row in members:
+        outstanding, pending = _pairwise_outstanding(db, group_id, user.id, person.id)
+        available = max(ZERO, outstanding - pending)
+        if available > ZERO:
+            options.append({
+                "user_id": str(person.id), "username": person.username,
+                "display_name": person.display_name, "currency": group.currency,
+                "outstanding_amount": _money(outstanding),
+                "pending_amount": _money(pending), "available_amount": _money(available),
+            })
+    return {"data": options}
+
+
 @router.get("/settlements", summary="List settlements in the signed-in user's groups")
 def list_my_settlements(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     group_ids = select(Membership.group_id).where(
@@ -728,7 +799,13 @@ def get_settlement(settlement_id: UUID, db: Session = Depends(get_db), user: Use
 
 @router.post("/groups/{group_id}/settlements", status_code=status.HTTP_201_CREATED, summary="Propose a settlement")
 def create_settlement(group_id: UUID, payload: SettlementCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    _require_active_group(db, group_id)
+    # Lock the group row so concurrent settlement proposals in this group see
+    # the preceding reservation before accepting another amount.
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
+    if group.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This group is archived and cannot accept new changes.")
     _membership(db, group_id, user.id)
     _validate_members(db, group_id, [user.id, payload.recipient_user_id])
     if payload.recipient_user_id == user.id:
@@ -740,6 +817,14 @@ def create_settlement(group_id: UUID, payload: SettlementCreate, db: Session = D
         ))
         if existing:
             return {"data": _serialize_settlement(db, existing)}
+    outstanding, pending = _pairwise_outstanding(db, group_id, user.id, payload.recipient_user_id)
+    available = max(ZERO, outstanding - pending)
+    if available <= ZERO:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You have no outstanding amount to settle with this member.")
+    if payload.currency != group.currency:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Settlement currency must match the group currency.")
+    if payload.amount > available:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Amount exceeds the available outstanding balance of INR {_money(available)}.")
     item = Settlement(
         group_id=group_id, payer_user_id=user.id, recipient_user_id=payload.recipient_user_id,
         created_by_user_id=user.id, amount=payload.amount, currency=payload.currency,
@@ -747,7 +832,6 @@ def create_settlement(group_id: UUID, payload: SettlementCreate, db: Session = D
     )
     db.add(item)
     db.flush()
-    group = _group(db, group_id)
     _notify(db, payload.recipient_user_id, "settlement", "Settlement proposed", f"{user.display_name or user.username} proposed INR {_money(payload.amount)} for {group.name}.", group_id=group_id, entity_type="settlement", entity_id=item.id)
     _activity(db, group_id, user.id, "settlement_proposed", f"{user.display_name or user.username} proposed a settlement of INR {_money(payload.amount)}.", "settlement", item.id)
     db.commit()
@@ -840,15 +924,42 @@ def list_activity(limit: int = Query(default=50, ge=1, le=100), offset: int = Qu
 
 @router.get("/users/me", summary="Get the signed-in user's profile")
 def get_profile(user: User = Depends(get_current_user)):
-    return {"data": {"id": str(user.id), "username": user.username, "email": user.email, "display_name": user.display_name, "is_email_verified": user.is_email_verified}}
+    cooldown_days = settings.username_change_cooldown_days
+    next_username_change_at = None
+    if user.username_changed_at and cooldown_days:
+        next_username_change_at = (_utc(user.username_changed_at) + timedelta(days=cooldown_days)).isoformat()
+    return {"data": {"id": str(user.id), "username": user.username, "email": user.email, "display_name": user.display_name, "is_email_verified": user.is_email_verified, "created_at": user.created_at.isoformat(), "username_changed_at": user.username_changed_at.isoformat() if user.username_changed_at else None, "username_change_cooldown_days": cooldown_days, "next_username_change_at": next_username_change_at}}
 
 
 @router.patch("/users/me", summary="Update the signed-in user's profile")
 def update_profile(payload: ProfilePatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    user.display_name = payload.display_name.strip()
+    # Serialize profile mutations so concurrent requests cannot race the cooldown check.
+    user = db.scalar(select(User).where(User.id == user.id).with_for_update()) or user
+    if payload.display_name is None and payload.username is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide a display name or username to update.")
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip()
+    if payload.username is not None:
+        username = payload.username.strip().lower()
+        if username != user.username.lower():
+            now = datetime.now(UTC)
+            cooldown_days = settings.username_change_cooldown_days
+            if user.username_changed_at and cooldown_days:
+                available_at = _utc(user.username_changed_at) + timedelta(days=cooldown_days)
+                if now < available_at:
+                    remaining = max(1, (available_at - now).days + bool((available_at - now).seconds))
+                    raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"You can change your username again in {remaining} days.")
+            if db.scalar(select(User.id).where(func.lower(User.username) == username, User.id != user.id)):
+                raise HTTPException(status.HTTP_409_CONFLICT, "That username is already in use.")
+            user.username = username
+            user.username_changed_at = now
     user.updated_at = datetime.now(UTC)
-    db.commit()
-    return {"data": {"id": str(user.id), "username": user.username, "email": user.email, "display_name": user.display_name}}
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "That username is already in use.")
+    return get_profile(user)
 
 
 @router.post("/auth/change-password", summary="Change the signed-in user's password")

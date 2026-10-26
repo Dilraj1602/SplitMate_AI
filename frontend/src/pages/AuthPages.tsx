@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent, type InputHTMLAttributes } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Eye, EyeOff } from 'lucide-react'
 import { api, ApiError } from '../services/api'
-import { ErrorState, Notice } from '../components/ui/Feedback'
+import { ErrorState } from '../components/ui/Feedback'
 import { useAuth } from '../app/auth'
+import { useToast } from '../components/ui/ToastProvider'
 
 type AuthMode = 'login' | 'register' | 'forgot' | 'reset' | 'verify'
 
@@ -19,8 +20,9 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [visible, setVisible] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const toast = useToast()
   const [params] = useSearchParams()
+  const location = useLocation()
   const [cooldown, setCooldown] = useState(() => params.get('email') && (mode === 'verify' || mode === 'reset') ? 60 : 0)
   const navigate = useNavigate()
   const auth = useAuth()
@@ -30,23 +32,27 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     const timer = window.setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000)
     return () => window.clearTimeout(timer)
   }, [cooldown])
+  useEffect(() => {
+    const incomingNotice = (location.state as { notice?: string } | null)?.notice
+    if (mode !== 'login' || !incomingNotice) return
+    toast.success(incomingNotice)
+  }, [location.state, mode, toast])
 
   async function resendCode() {
     const email = String(params.get('email') || '')
     if (!email || busy || cooldown) return
-    setError(''); setNotice(''); setBusy(true)
+    setError(''); setBusy(true)
     try {
       await api.post(mode === 'verify' ? '/auth/resend-verification' : '/auth/password-reset/request', { email })
-      setNotice(mode === 'verify' ? 'If an unverified account matches that email, a code will be sent.' : 'If an eligible account matches that email, reset instructions will be sent.')
+      toast.info(mode === 'verify' ? 'If an unverified account matches that email, a code will be sent.' : 'If an eligible account matches that email, reset instructions will be sent.')
       setCooldown(60)
-    } catch (cause) { setError(cause instanceof ApiError ? cause.message : 'The request could not be completed.') }
+    } catch (cause) { toast.error(cause instanceof ApiError ? cause.message : 'The request could not be completed.') }
     finally { setBusy(false) }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError('')
-    setNotice('')
     const form = new FormData(event.currentTarget)
     const values = Object.fromEntries(form.entries())
     if ((mode === 'register' || mode === 'reset') && values.password !== values.confirm_password) {
@@ -75,16 +81,20 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             : values
       await api.post(current.path, payload)
       if (mode === 'register') {
+        toast.success('Account created. Check your email for a verification code.')
         navigate(`/verify-email?email=${encodeURIComponent(String(values.email))}`)
       } else if (mode === 'forgot') {
+        toast.info('If an eligible account matches that email, reset instructions will be sent.')
         navigate(`/reset-password?email=${encodeURIComponent(String(values.email))}`)
       } else if (mode === 'verify') {
-        setNotice('Email verified. You can sign in now.')
+        toast.success('Email verified. You can sign in now.')
+        navigate('/login', { replace: true })
       } else {
-        setNotice('Password update request accepted. Sign in with your new password.')
+        toast.success('Password updated. Sign in with your new password.')
+        navigate('/login')
       }
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : 'The request could not be completed.')
+      toast.error(cause instanceof ApiError ? cause.message : 'The request could not be completed.')
     } finally {
       setBusy(false)
     }
@@ -101,8 +111,8 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         {(mode === 'verify' || mode === 'reset') && <Field name="email" label="Email address" type="email" autoComplete="email" required defaultValue={params.get('email') || ''} />}
         {(mode === 'verify' || mode === 'reset') && <Field name="code" label="Six-digit code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" required />}
         {(mode === 'login' || mode === 'register' || mode === 'reset') && <div className="field-wrap"><div className="field-label-row"><label htmlFor="password">{mode === 'reset' ? 'New password' : 'Password'}</label>{mode === 'login' && <Link to="/forgot-password" className="text-button">Forgot password?</Link>}</div><div className="password-control"><input id="password" name="password" type={visible ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'login' ? undefined : 6} required aria-describedby="password-hint" /><button type="button" className="password-toggle" onClick={() => setVisible(!visible)} aria-label={visible ? 'Hide password' : 'Show password'}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></div>{mode !== 'login' && <small id="password-hint" className="field-hint">Use at least 6 characters.</small>}</div>}
-        {(mode === 'register' || mode === 'reset') && <Field name="confirm_password" label="Confirm password" type={visible ? 'text' : 'password'} autoComplete="new-password" required />}
-        {error && <ErrorState message={error} />}{notice && <Notice>{notice}</Notice>}
+        {(mode === 'register' || mode === 'reset') && <div className="field-wrap"><label htmlFor="confirm_password">Confirm password</label><div className="password-control"><input id="confirm_password" name="confirm_password" type={visible ? 'text' : 'password'} autoComplete="new-password" required /><button type="button" className="password-toggle" onClick={() => setVisible(value => !value)} aria-label={visible ? 'Hide password' : 'Show password'}>{visible ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></div>}
+        {error && <ErrorState message={error} />}
         <button className="button button-primary button-full" disabled={busy}>{busy ? 'Please wait…' : current.submit}</button>
       </form>
       {(mode === 'verify' || mode === 'reset') && <button type="button" className="text-button" disabled={busy || cooldown > 0} onClick={resendCode}>{cooldown ? `Resend available in ${cooldown}s` : 'Resend code'}</button>}

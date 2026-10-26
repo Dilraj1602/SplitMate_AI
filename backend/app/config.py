@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     otp_resend_cooldown_seconds: int = 60
     otp_rate_limit_per_hour: int = 5
     access_token_expiry_minutes: int = 15
+    username_change_cooldown_days: int = Field(default=30, ge=0, le=3650)
     dev_otp_bypass: bool = Field(
         default=False,
         validation_alias="DEV_OTP_BYPASS",

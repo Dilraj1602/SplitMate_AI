@@ -6,7 +6,7 @@ import {
   AccessDeniedPage, ActivityPage, BalancesPage, ExpenseCreatePage, ExpenseDetailPage,
   ExpenseEditPage, ExpenseHistoryPage, ExpensesPage, GroupCreatePage, GroupPage,
   GroupSettingsPage, GroupsPage, InviteLinkPage, InviteMemberPage, InvitationsPage, InvitePreviewPage, MembersPage, NotificationsPage,
-  OverviewPage, PersonalBalancesPage, PersonalSettlementsPage, ProfilePage, SecurityPage, SettlementCreatePage, SettlementDetailPage, SettlementsPage,
+  AccountSettingsPage, AllExpensesPage, OverviewPage, PersonalBalancesPage, PersonalSettlementsPage, ProfilePage, SecurityPage, SettlementCreatePage, SettlementDetailPage, SettlementsPage,
 } from '../pages/ProductPages'
 
 function RequireSession() {
@@ -43,6 +43,7 @@ export const router = createBrowserRouter([
     { path: 'groups/:groupId/settlements', element: <SettlementsPage /> },
     { path: 'groups/:groupId/settlements/new', element: <SettlementCreatePage /> },
     { path: 'groups/:groupId/settlements/:settlementId', element: <SettlementDetailPage /> },
+    { path: 'expenses', element: <AllExpensesPage /> },
     { path: 'expenses/:expenseId', element: <ExpenseDetailPage /> },
     { path: 'expenses/:expenseId/edit', element: <ExpenseEditPage /> },
     { path: 'expenses/:expenseId/history', element: <ExpenseHistoryPage /> },
@@ -52,6 +53,7 @@ export const router = createBrowserRouter([
     { path: 'activity', element: <ActivityPage /> },
     { path: 'notifications', element: <NotificationsPage /> },
     { path: 'settings/profile', element: <ProfilePage /> },
+    { path: 'settings', element: <AccountSettingsPage /> },
     { path: 'settings/security', element: <SecurityPage /> },
   ] },
   { path: '*', element: <NotFoundPage /> },

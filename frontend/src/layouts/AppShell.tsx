@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { NavLink, Outlet } from 'react-router-dom'
-import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity } from 'lucide-react'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity, UserRound } from 'lucide-react'
 import { useAuth } from '../app/auth'
 import { api } from '../services/api'
 
@@ -13,11 +13,20 @@ const mainNav = [
 
 export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const profileRef = useRef<HTMLDivElement>(null)
+  const navigate = useNavigate()
   const auth = useAuth()
   const profile = useQuery({ queryKey: ['profile'], queryFn: ({ signal }) => api.get<{ data: { display_name: string; username: string; email: string } }>('/users/me', signal) })
   const unread = useQuery({ queryKey: ['notification-count'], queryFn: ({ signal }) => api.get<{ data: { unread_count: number } }>('/notifications/unread-count', signal) })
   const displayName = profile.data?.data.display_name || profile.data?.data.username || 'Your account'
   const avatar = displayName.slice(0, 1).toUpperCase()
+  useEffect(() => {
+    function outside(event: MouseEvent) { if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false) }
+    function escape(event: KeyboardEvent) { if (event.key === 'Escape') setProfileOpen(false) }
+    document.addEventListener('mousedown', outside); document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape) }
+  }, [])
 
   async function signOut() {
     try {
@@ -36,14 +45,14 @@ export function AppShell() {
       </nav>
       <div className="sidebar-bottom">
         <NavLink to="/app/notifications" className="nav-link"><Bell size={19} strokeWidth={1.8} /><span>Notifications</span></NavLink>
-        <NavLink to="/app/settings/profile" className="nav-link"><Settings size={19} strokeWidth={1.8} /><span>Settings</span></NavLink>
+        <NavLink to="/app/settings" className="nav-link"><Settings size={19} strokeWidth={1.8} /><span>Settings</span></NavLink>
         <p className="sidebar-help">Help and feedback will be available when support is configured.</p>
-        <div className="account-mini"><span className="avatar" aria-hidden="true">{avatar}</span><span className="account-copy"><strong>{displayName}</strong><small>{profile.data?.data.email || 'Loading account'}</small></span><ChevronDown size={15} /></div>
+        <div className="profile-menu-wrap" ref={profileRef}><button type="button" className="account-mini" aria-haspopup="menu" aria-expanded={profileOpen} onClick={() => setProfileOpen(open => !open)}><span className="avatar" aria-hidden="true">{avatar}</span><span className="account-copy"><strong>{displayName}</strong><small>{profile.data?.data.email || 'Loading account'}</small></span><ChevronDown size={15} /></button>{profileOpen && <div className="profile-menu" role="menu"><button role="menuitem" onClick={() => { setProfileOpen(false); navigate('/app/settings/profile') }}><UserRound size={16}/>My Profile</button><button role="menuitem" onClick={() => { setProfileOpen(false); navigate('/app/settings') }}><Settings size={16}/>Account Settings</button><button role="menuitem" onClick={() => { setProfileOpen(false); void signOut() }}>Sign Out</button></div>}</div>
       </div>
     </aside>
     {menuOpen && <button className="drawer-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
     <div className="workspace">
-      <header className="topbar"><button className="icon-button menu-toggle" aria-label="Open navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu size={20} /></button><div className="topbar-context">Shared expenses, made clear.</div><div className="topbar-actions"><NavLink to="/app/notifications" className="icon-button" aria-label={unread.data?.data.unread_count ? `Notifications, ${unread.data.data.unread_count} unread` : 'Notifications'}><Bell size={19} />{Boolean(unread.data?.data.unread_count) && <span className="notification-count">{unread.data?.data.unread_count}</span>}</NavLink><button type="button" className="button button-small button-outline" onClick={signOut}>Sign out</button></div></header>
+      <header className="topbar"><button className="icon-button menu-toggle" aria-label="Open navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu size={20} /></button><div className="topbar-context" aria-hidden="true"></div><div className="topbar-actions"><NavLink to="/app/notifications" className="icon-button" aria-label={unread.data?.data.unread_count ? `Notifications, ${unread.data.data.unread_count} unread` : 'Notifications'}><Bell size={19} />{Boolean(unread.data?.data.unread_count) && <span className="notification-count">{unread.data?.data.unread_count}</span>}</NavLink><button type="button" className="button button-small button-outline" onClick={signOut}>Sign out</button></div></header>
       <main id="main-content" className="main-content"><Outlet /></main>
     </div>
   </div>

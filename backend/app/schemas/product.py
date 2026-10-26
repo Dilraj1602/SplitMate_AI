@@ -115,7 +115,8 @@ class SettlementCreate(BaseModel):
 
 
 class ProfilePatch(BaseModel):
-    display_name: str = Field(min_length=1, max_length=100)
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    username: str | None = Field(default=None, min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
 
 
 class ChangePassword(BaseModel):
