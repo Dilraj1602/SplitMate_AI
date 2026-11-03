@@ -1,4 +1,8 @@
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -7,11 +11,39 @@ from sqlalchemy.exc import SQLAlchemyError
 from backend.app.config import settings
 from backend.app.db.session import engine
 from backend.app.api.v1.router import router as api_v1_router
+from backend.app.services.autopay import process_autopays
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stopped = asyncio.Event()
+
+    async def run_scheduler():
+        while not stopped.is_set():
+            try:
+                await asyncio.to_thread(process_autopays)
+            except Exception:
+                # The next poll retries pending reminder and occurrence work.
+                logger.exception("Recurring autopay scheduler poll failed")
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                continue
+
+    task = asyncio.create_task(run_scheduler())
+    try:
+        yield
+    finally:
+        stopped.set()
+        await task
 
 app = FastAPI(
     title="SplitMate AI API",
     description="Backend API for SplitMate AI expense sharing.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 app.include_router(api_v1_router, prefix="/api/v1")
 

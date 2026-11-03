@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -92,6 +93,30 @@ class ExpenseCreate(BaseModel):
         return validate_money_scale(value)
 
 
+class AutopayCreate(BaseModel):
+    description: str = Field(min_length=1, max_length=255)
+    amount: Decimal = Field(gt=0)
+    currency: Literal["INR"] = "INR"
+    payer_user_id: UUID
+    split_type: Literal["equal", "exact", "percentage"]
+    splits: list[ExpenseShareInput] = Field(min_length=1, max_length=100)
+    percentages: list[PercentageInput] | None = None
+    frequency: Literal["daily", "weekly", "monthly", "yearly"]
+    repeat_interval: int = Field(default=1, ge=1, le=365)
+    start_date: date
+    end_date: date | None = None
+    timezone: str = Field(default="Asia/Kolkata", min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Provide a valid IANA timezone.") from exc
+        return value
+
+
 class ExpensePatch(BaseModel):
     description: str = Field(min_length=1, max_length=255)
     total_amount: Decimal = Field(gt=0)
@@ -117,6 +142,15 @@ class SettlementCreate(BaseModel):
 class ProfilePatch(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
     username: str | None = Field(default=None, min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def profile_timezone(cls, value: str | None) -> str | None:
+        if value is not None:
+            try: ZoneInfo(value)
+            except (ZoneInfoNotFoundError, ValueError) as exc: raise ValueError("Provide a valid IANA timezone.") from exc
+        return value
 
 
 class ChangePassword(BaseModel):

@@ -6,7 +6,7 @@ import {
   AccessDeniedPage, ActivityPage, BalancesPage, ExpenseCreatePage, ExpenseDetailPage,
   ExpenseEditPage, ExpenseHistoryPage, ExpensesPage, GroupCreatePage, GroupPage,
   GroupSettingsPage, GroupsPage, InviteLinkPage, InviteMemberPage, InvitationsPage, InvitePreviewPage, MembersPage, NotificationsPage,
-  AccountSettingsPage, AllExpensesPage, OverviewPage, PersonalBalancesPage, PersonalSettlementsPage, ProfilePage, SecurityPage, SettlementCreatePage, SettlementDetailPage, SettlementsPage,
+  AccountSettingsPage, AllExpensesPage, AutopaysPage, OverviewPage, PersonalBalancesPage, PersonalSettlementsPage, ProfilePage, SecurityPage, SettlementCreatePage, SettlementDetailPage, SettlementsPage,
 } from '../pages/ProductPages'
 
 function RequireSession() {
@@ -52,6 +52,7 @@ export const router = createBrowserRouter([
     { path: 'invitations', element: <InvitationsPage /> },
     { path: 'activity', element: <ActivityPage /> },
     { path: 'notifications', element: <NotificationsPage /> },
+    { path: 'autopays', element: <AutopaysPage /> },
     { path: 'settings/profile', element: <ProfilePage /> },
     { path: 'settings', element: <AccountSettingsPage /> },
     { path: 'settings/security', element: <SecurityPage /> },

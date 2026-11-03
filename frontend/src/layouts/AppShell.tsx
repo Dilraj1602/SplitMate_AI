@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity, UserRound } from 'lucide-react'
+import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity, UserRound, Repeat } from 'lucide-react'
 import { useAuth } from '../app/auth'
 import { api } from '../services/api'
+import { FloatingQuickActions } from '../features/quickActions/FloatingQuickActions'
+import { QuickActionPreferencesProvider } from '../features/quickActions/preferences'
 
 const mainNav = [
   { to: '/app', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -11,7 +13,7 @@ const mainNav = [
   { to: '/app/activity', label: 'Activity', icon: Activity },
 ]
 
-export function AppShell() {
+function AppShellContent() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const profileRef = useRef<HTMLDivElement>(null)
@@ -44,6 +46,7 @@ export function AppShell() {
         {mainNav.map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} onClick={() => setMenuOpen(false)} className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}><Icon size={19} strokeWidth={1.8} /><span>{label}</span></NavLink>)}
       </nav>
       <div className="sidebar-bottom">
+        <NavLink to="/app/autopays" className="nav-link"><Repeat size={19} strokeWidth={1.8} /><span>My autopays</span></NavLink>
         <NavLink to="/app/notifications" className="nav-link"><Bell size={19} strokeWidth={1.8} /><span>Notifications</span></NavLink>
         <NavLink to="/app/settings" className="nav-link"><Settings size={19} strokeWidth={1.8} /><span>Settings</span></NavLink>
         <p className="sidebar-help">Help and feedback will be available when support is configured.</p>
@@ -55,5 +58,10 @@ export function AppShell() {
       <header className="topbar"><button className="icon-button menu-toggle" aria-label="Open navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu size={20} /></button><div className="topbar-context" aria-hidden="true"></div><div className="topbar-actions"><NavLink to="/app/notifications" className="icon-button" aria-label={unread.data?.data.unread_count ? `Notifications, ${unread.data.data.unread_count} unread` : 'Notifications'}><Bell size={19} />{Boolean(unread.data?.data.unread_count) && <span className="notification-count">{unread.data?.data.unread_count}</span>}</NavLink><button type="button" className="button button-small button-outline" onClick={signOut}>Sign out</button></div></header>
       <main id="main-content" className="main-content"><Outlet /></main>
     </div>
+    <FloatingQuickActions />
   </div>
+}
+
+export function AppShell() {
+  return <QuickActionPreferencesProvider><AppShellContent /></QuickActionPreferencesProvider>
 }

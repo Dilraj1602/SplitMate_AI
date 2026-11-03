@@ -25,6 +25,7 @@ class User(Base):
     )
 
     display_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata", server_default="Asia/Kolkata")
 
     email: Mapped[str] = mapped_column(
         String(255),

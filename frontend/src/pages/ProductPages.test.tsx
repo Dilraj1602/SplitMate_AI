@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import { AccountSettingsPage, AllExpensesPage, ExpenseRows, GroupBalancesPage, SecurityPage, SettlementCreatePage, InviteMemberPage } from './ProductPages'
 import { ToastProvider } from '../components/ui/ToastProvider'
+import { QuickActionPreferencesProvider } from '../features/quickActions/preferences'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 function renderWithQueries(ui: ReactNode, initialEntries = ['/']) {
@@ -15,7 +16,7 @@ function renderWithQueries(ui: ReactNode, initialEntries = ['/']) {
 
 describe('account settings and expense details', () => {
   it('separates account settings from the password page', () => {
-    render(<MemoryRouter><AccountSettingsPage /></MemoryRouter>)
+    render(<MemoryRouter><QuickActionPreferencesProvider><AccountSettingsPage /></QuickActionPreferencesProvider></MemoryRouter>)
     expect(screen.getByRole('link', { name: /Profile information/ })).toHaveAttribute('href', '/app/settings/profile')
     expect(screen.getByRole('link', { name: /Password and security/ })).toHaveAttribute('href', '/app/settings/security')
   })

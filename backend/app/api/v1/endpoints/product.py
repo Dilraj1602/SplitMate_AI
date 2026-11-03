@@ -13,6 +13,9 @@ from backend.app.config import settings
 from backend.app.dependencies import get_current_user, get_db
 from backend.app.models import (
     ActivityEvent,
+    AutopayOccurrence,
+    AutopayParticipant,
+    AutopayReminderLog,
     Expense,
     ExpenseSplit,
     Group,
@@ -21,11 +24,13 @@ from backend.app.models import (
     JoinRequest,
     Membership,
     Notification,
+    RecurringAutopay,
     Settlement,
     User,
 )
 from backend.app.schemas.product import (
     ChangePassword,
+    AutopayCreate,
     ExpenseCreate,
     ExpensePatch,
     GroupCreate,
@@ -35,6 +40,7 @@ from backend.app.schemas.product import (
     SettlementCreate,
 )
 from backend.app.services.auth import hash_password, verify_password
+from backend.app.services.expenses import create_expense_record
 
 router = APIRouter(tags=["Application"])
 INR = "INR"
@@ -602,6 +608,70 @@ def list_expenses(group_id: UUID, limit: int = Query(default=20, ge=1, le=100), 
     return _collection([_serialize_expense(db, item) for item in items], total, limit, offset)
 
 
+@router.get("/groups/{group_id}/analytics/expense-distribution", summary="Get expense spending by payer")
+def expense_distribution(
+    group_id: UUID,
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Aggregate active expenses by payer; splits and settlements are not spending."""
+    _membership(db, group_id, user.id)
+    group = _group(db, group_id)
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Start date must be on or before end date.")
+
+    filters = [Expense.group_id == group_id, Expense.status == "active"]
+    if start_date:
+        filters.append(Expense.expense_date >= start_date)
+    if end_date:
+        filters.append(Expense.expense_date <= end_date)
+    currencies = db.scalars(select(Expense.currency).where(*filters).distinct()).all()
+    if any(currency != group.currency for currency in currencies):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Expense currencies do not match the group currency; spending cannot be combined.")
+
+    member_rows = db.execute(
+        select(User.id, User.username, User.display_name)
+        .join(Membership, Membership.user_id == User.id)
+        .where(Membership.group_id == group_id, Membership.status == "active")
+        .order_by(User.id)
+    ).all()
+    active_ids = {row.id for row in member_rows}
+    totals = {row.id: ZERO for row in member_rows}
+    aggregate_rows = db.execute(
+        select(Expense.paid_by_user_id, func.sum(Expense.total_amount))
+        .where(*filters)
+        .group_by(Expense.paid_by_user_id)
+    ).all()
+    # Include payers from historical expenses even if they are no longer active members.
+    payer_ids = [payer_id for payer_id, _ in aggregate_rows]
+    historical_users = {}
+    if payer_ids:
+        historical_users = {person.id: person for person in db.scalars(select(User).where(User.id.in_(payer_ids))).all()}
+    for payer_id, amount in aggregate_rows:
+        totals[payer_id] = amount or ZERO
+
+    total = sum(totals.values(), ZERO)
+    members = []
+    for row in member_rows:
+        amount = totals.pop(row.id, ZERO)
+        members.append({"user_id": str(row.id), "username": row.username,
+                        "display_name": row.display_name or row.username,
+                        "total_spent": _money(amount),
+                        "percentage": float(amount / total * 100) if total else 0})
+    for payer_id, amount in aggregate_rows:
+        person = historical_users.get(payer_id)
+        if person and payer_id not in active_ids:
+            members.append({"user_id": str(payer_id), "username": person.username,
+                            "display_name": person.display_name or person.username,
+                            "total_spent": _money(amount or ZERO),
+                            "percentage": float((amount or ZERO) / total * 100) if total else 0})
+    return {"data": {"group_id": str(group_id), "currency": group.currency,
+                     "total_expenses": _money(total), "member_count": len(member_rows),
+                     "members": members}}
+
+
 @router.get("/expenses", summary="List active expenses in the signed-in user's groups")
 def list_all_expenses(limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     query = (
@@ -638,17 +708,10 @@ def create_expense(group_id: UUID, payload: ExpenseCreate, db: Session = Depends
     split_amounts = _split_amounts(payload)
     member_ids = [item[0] for item in split_amounts]
     _validate_members(db, group_id, list(set([payload.paid_by_user_id, *member_ids])))
-    expense = Expense(
-        group_id=group_id, paid_by_user_id=payload.paid_by_user_id,
-        created_by_user_id=user.id, description=payload.description.strip(),
-        expense_date=payload.expense_date, currency=payload.currency,
-        total_amount=payload.total_amount, split_type=payload.split_type,
-        idempotency_key=payload.idempotency_key,
-    )
-    db.add(expense)
-    db.flush()
-    for participant_id, amount in split_amounts:
-        db.add(ExpenseSplit(expense_id=expense.id, user_id=participant_id, amount=amount))
+    expense = create_expense_record(db, group_id=group_id, paid_by_user_id=payload.paid_by_user_id,
+        created_by_user_id=user.id, description=payload.description, expense_date=payload.expense_date,
+        currency=payload.currency, total_amount=payload.total_amount, split_type=payload.split_type,
+        split_amounts=split_amounts, idempotency_key=payload.idempotency_key)
     _activity(db, group_id, user.id, "expense_created", f"{user.display_name or user.username} added {expense.description}.", "expense", expense.id)
     group = _group(db, group_id)
     for recipient_id in set(member_ids + [payload.paid_by_user_id]):
@@ -657,6 +720,101 @@ def create_expense(group_id: UUID, payload: ExpenseCreate, db: Session = Depends
     db.commit()
     db.refresh(expense)
     return {"data": _serialize_expense(db, expense)}
+
+
+def _serialize_autopay(db: Session, item: RecurringAutopay, user_id: UUID) -> dict:
+    participants = db.scalars(select(AutopayParticipant).where(AutopayParticipant.autopay_id == item.id)).all()
+    people = {person.id: person for person in db.scalars(select(User).where(User.id.in_([p.user_id for p in participants]))).all()} if participants else {}
+    creator = db.get(User, item.created_by_user_id)
+    occurrences = db.scalars(select(AutopayOccurrence).where(AutopayOccurrence.autopay_id == item.id).order_by(AutopayOccurrence.scheduled_date.desc()).limit(20)).all()
+    reminder_logs = db.scalars(select(AutopayReminderLog).join(AutopayOccurrence, AutopayOccurrence.id == AutopayReminderLog.occurrence_id)
+        .where(AutopayOccurrence.autopay_id == item.id, AutopayReminderLog.user_id == user_id).order_by(AutopayReminderLog.scheduled_at.desc()).limit(80)).all()
+    reminders_by_occurrence: dict[UUID, list[dict]] = {}
+    for reminder in reminder_logs:
+        reminders_by_occurrence.setdefault(reminder.occurrence_id, []).append({"type": reminder.reminder_type,
+            "sent_at": reminder.sent_at.isoformat() if reminder.sent_at else None, "delivery_status": reminder.delivery_status})
+    return {"id": str(item.id), "current_user_id": str(user_id), "group_id": str(item.group_id), "description": item.description,
+        "amount": _money(item.amount), "currency": item.currency, "payer_user_id": str(item.payer_user_id),
+        "split_type": item.split_type, "frequency": item.frequency, "repeat_interval": item.repeat_interval,
+        "start_date": item.start_date.isoformat(), "end_date": item.end_date.isoformat() if item.end_date else None,
+        "next_payment_date": item.next_payment_date.isoformat(), "timezone": item.timezone, "status": item.status,
+        "created_by_user_id": str(item.created_by_user_id), "created_by": (creator.display_name or creator.username) if creator else "Member",
+        "my_share": next((_money(p.share_amount) for p in participants if p.user_id == user_id), "0.00"),
+        "participants": [{"user_id": str(p.user_id), "name": (people[p.user_id].display_name or people[p.user_id].username) if p.user_id in people else "Member",
+            "share_amount": _money(p.share_amount), "approval_status": p.approval_status, "participation_status": p.participation_status} for p in participants],
+        "occurrences": [{"id": str(o.id), "scheduled_date": o.scheduled_date.isoformat(), "expense_id": str(o.expense_id) if o.expense_id else None, "status": o.status,
+            "reminders": reminders_by_occurrence.get(o.id, [])} for o in occurrences]}
+
+
+@router.post("/groups/{group_id}/autopays", status_code=status.HTTP_201_CREATED, summary="Create a recurring expense request")
+def create_autopay(group_id: UUID, payload: AutopayCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_active_group(db, group_id)
+    _membership(db, group_id, user.id)
+    expense_payload = ExpenseCreate(description=payload.description, expense_date=payload.start_date, currency=payload.currency,
+        total_amount=payload.amount, paid_by_user_id=payload.payer_user_id, split_type=payload.split_type,
+        splits=payload.splits, percentages=payload.percentages)
+    shares = _split_amounts(expense_payload)
+    _validate_members(db, group_id, list({payload.payer_user_id, *(person_id for person_id, _ in shares)}))
+    if payload.end_date and payload.end_date < payload.start_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "End date must be on or after the start date.")
+    item = RecurringAutopay(group_id=group_id, created_by_user_id=user.id, description=payload.description.strip(), amount=payload.amount,
+        currency=payload.currency, payer_user_id=payload.payer_user_id, split_type=payload.split_type, frequency=payload.frequency,
+        repeat_interval=payload.repeat_interval, start_date=payload.start_date, end_date=payload.end_date,
+        next_payment_date=payload.start_date, timezone=payload.timezone)
+    db.add(item); db.flush()
+    member_ids = {person_id for person_id, _ in shares}
+    item.status = "active" if member_ids <= {user.id} else "pending"
+    for person_id, amount in shares:
+        db.add(AutopayParticipant(autopay_id=item.id, user_id=person_id, share_amount=amount,
+            approval_status="accepted" if person_id == user.id else "pending"))
+    group = _group(db, group_id)
+    for person_id in member_ids - {user.id}:
+        _notify(db, person_id, "autopay_invitation", "New Autopay Request",
+            f"{user.display_name or user.username} wants to create a recurring expense: {item.description} ({group.currency} {_money(item.amount)}). Your share is {group.currency} {_money(next((amount for uid, amount in shares if uid == person_id), ZERO))}.",
+            group_id=group_id, entity_type="autopay", entity_id=item.id)
+    db.commit(); db.refresh(item)
+    return {"data": _serialize_autopay(db, item, user.id)}
+
+
+@router.get("/autopays", summary="List recurring expenses involving the signed-in user")
+def list_autopays(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    ids = select(AutopayParticipant.autopay_id).where(AutopayParticipant.user_id == user.id)
+    items = db.scalars(select(RecurringAutopay).where(or_(RecurringAutopay.created_by_user_id == user.id, RecurringAutopay.id.in_(ids))).order_by(RecurringAutopay.next_payment_date)).all()
+    return {"data": [_serialize_autopay(db, item, user.id) for item in items]}
+
+
+@router.post("/autopays/{autopay_id}/{action}", summary="Respond to or manage an autopay")
+def autopay_action(autopay_id: UUID, action: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if action not in {"accept", "decline", "pause", "resume", "delete"}:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Autopay action not found.")
+    item = db.scalar(select(RecurringAutopay).where(RecurringAutopay.id == autopay_id).with_for_update())
+    participant = db.scalar(select(AutopayParticipant).where(AutopayParticipant.autopay_id == autopay_id, AutopayParticipant.user_id == user.id).with_for_update())
+    if not item or not participant:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Autopay not found.")
+    if action in {"accept", "decline"}:
+        if participant.approval_status != "pending": raise HTTPException(status.HTTP_409_CONFLICT, "This request has already been answered.")
+        participant.approval_status = "accepted" if action == "accept" else "declined"
+        if action == "accept": participant.accepted_at = datetime.now(UTC)
+        elif item.status == "pending": item.status = "declined"
+        if action == "accept":
+            pending = db.scalar(select(func.count()).select_from(AutopayParticipant).where(AutopayParticipant.autopay_id == item.id, AutopayParticipant.approval_status == "pending")) or 0
+            declined = db.scalar(select(func.count()).select_from(AutopayParticipant).where(AutopayParticipant.autopay_id == item.id, AutopayParticipant.approval_status == "declined")) or 0
+            item.status = "declined" if declined else "active" if pending == 0 else "pending"
+        action_text = "accepted" if action == "accept" else "declined"
+    else:
+        if user.id == item.created_by_user_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a participant can manage their participation.")
+        if participant.approval_status != "accepted": raise HTTPException(status.HTTP_409_CONFLICT, "Accept the autopay before managing it.")
+        if action == "pause": participant.participation_status = "paused"; participant.paused_at = datetime.now(UTC); item.status = "paused"
+        elif action == "resume": participant.participation_status = "active"; participant.paused_at = None; item.status = "active"
+        else: participant.participation_status = "deleted"; participant.deleted_at = datetime.now(UTC); item.status = "active"
+        action_text = {"pause":"paused", "resume":"resumed", "delete":"withdrew from"}[action]
+    creator = db.get(User, item.created_by_user_id)
+    _notify(db, item.created_by_user_id, "autopay_update", "Autopay update", f"{user.display_name or user.username} {action_text} {item.description}.", group_id=item.group_id, entity_type="autopay", entity_id=item.id)
+    if action in {"pause", "resume", "delete"}:
+        _activity(db, item.group_id, user.id, f"autopay_{action}", f"{user.display_name or user.username} {action_text} {item.description}.", "autopay", item.id)
+    db.commit(); db.refresh(item)
+    return {"data": _serialize_autopay(db, item, user.id)}
 
 
 def _expense_access(db: Session, expense_id: UUID, user: User) -> tuple[Expense, Membership]:
@@ -928,17 +1086,19 @@ def get_profile(user: User = Depends(get_current_user)):
     next_username_change_at = None
     if user.username_changed_at and cooldown_days:
         next_username_change_at = (_utc(user.username_changed_at) + timedelta(days=cooldown_days)).isoformat()
-    return {"data": {"id": str(user.id), "username": user.username, "email": user.email, "display_name": user.display_name, "is_email_verified": user.is_email_verified, "created_at": user.created_at.isoformat(), "username_changed_at": user.username_changed_at.isoformat() if user.username_changed_at else None, "username_change_cooldown_days": cooldown_days, "next_username_change_at": next_username_change_at}}
+    return {"data": {"id": str(user.id), "username": user.username, "email": user.email, "display_name": user.display_name, "timezone": user.timezone, "is_email_verified": user.is_email_verified, "created_at": user.created_at.isoformat(), "username_changed_at": user.username_changed_at.isoformat() if user.username_changed_at else None, "username_change_cooldown_days": cooldown_days, "next_username_change_at": next_username_change_at}}
 
 
 @router.patch("/users/me", summary="Update the signed-in user's profile")
 def update_profile(payload: ProfilePatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     # Serialize profile mutations so concurrent requests cannot race the cooldown check.
     user = db.scalar(select(User).where(User.id == user.id).with_for_update()) or user
-    if payload.display_name is None and payload.username is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide a display name or username to update.")
+    if payload.display_name is None and payload.username is None and payload.timezone is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide a profile value to update.")
     if payload.display_name is not None:
         user.display_name = payload.display_name.strip()
+    if payload.timezone is not None:
+        user.timezone = payload.timezone
     if payload.username is not None:
         username = payload.username.strip().lower()
         if username != user.username.lower():

@@ -71,6 +71,30 @@ def test_group_expense_balance_settlement_and_notifications(monkeypatch):
         assert expense_response.status_code == 201, expense_response.text
         expense = expense_response.json()["data"]
         assert [part["amount"] for part in expense["splits"]] == ["50.00", "50.00"]
+        analytics = client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution", headers=alice_headers)
+        assert analytics.status_code == 200
+        assert analytics.json()["data"]["total_expenses"] == "100.00"
+        assert analytics.json()["data"]["member_count"] == 3
+        assert {row["username"]: row["total_spent"] for row in analytics.json()["data"]["members"]} == {
+            "alice": "100.00", "bob": "0.00", "carol": "0.00",
+        }
+        assert sum(row["percentage"] for row in analytics.json()["data"]["members"]) == 100
+        assert client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution?start_date=2026-10-26&end_date=2026-10-26", headers=alice_headers).json()["data"]["total_expenses"] == "0.00"
+        assert client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution?start_date=2026-10-26&end_date=2026-10-25", headers=alice_headers).status_code == 422
+        assert client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution", headers=carol_headers).status_code == 200
+        assert client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution").status_code == 401
+        second_expense = client.post(f"/api/v1/groups/{group_id}/expenses", headers=bob_headers, json={
+            "description": "Taxi", "expense_date": "2026-10-25", "currency": "INR", "total_amount": "50.00",
+            "paid_by_user_id": str(bob_id), "split_type": "equal",
+            "splits": [{"user_id": str(alice_id), "amount": "25.00"}, {"user_id": str(bob_id), "amount": "25.00"}],
+        })
+        assert second_expense.status_code == 201
+        distribution = client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution", headers=alice_headers).json()["data"]
+        assert distribution["total_expenses"] == "150.00"
+        assert {row["username"]: row["percentage"] for row in distribution["members"]} == {
+            "alice": 100 / 1.5, "bob": 100 / 3, "carol": 0,
+        }
+        assert client.post(f"/api/v1/expenses/{second_expense.json()['data']['id']}/void", headers=bob_headers).status_code == 200
         assert client.get("/api/v1/dashboard", headers=alice_headers).json()["summary"]["expense_count"] == 1
         all_expenses = client.get("/api/v1/expenses", headers=alice_headers)
         assert all_expenses.status_code == 200
@@ -119,10 +143,14 @@ def test_group_expense_balance_settlement_and_notifications(monkeypatch):
         second_confirmed = client.post(f"/api/v1/settlements/{second_proposal.json()['data']['id']}/confirm", headers=alice_headers)
         assert second_confirmed.status_code == 200
         assert all(row["net_amount"] == "0.00" for row in client.get(f"/api/v1/groups/{group_id}/balances", headers=alice_headers).json()["data"])
+        assert client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution", headers=alice_headers).json()["data"]["total_expenses"] == "100.00"
         assert client.get("/api/v1/dashboard", headers=alice_headers).json()["summary"]["expense_count"] == 1
         voided = client.post(f"/api/v1/expenses/{expense['id']}/void", headers=alice_headers)
         assert voided.status_code == 200
         assert client.get("/api/v1/dashboard", headers=alice_headers).json()["summary"]["expense_count"] == 0
+        zero_distribution = client.get(f"/api/v1/groups/{group_id}/analytics/expense-distribution", headers=alice_headers).json()["data"]
+        assert zero_distribution["total_expenses"] == "0.00"
+        assert all(row["percentage"] == 0 for row in zero_distribution["members"])
 
         bob_notifications = client.get("/api/v1/notifications", headers=bob_headers)
         assert bob_notifications.status_code == 200

@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     Index,
     Numeric,
     String,
@@ -172,3 +173,62 @@ class ActivityEvent(Base):
     entity_type: Mapped[str | None] = mapped_column(String(32))
     entity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class RecurringAutopay(Base):
+    __tablename__ = "recurring_autopays"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    description: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
+    payer_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    split_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    frequency: Mapped[str] = mapped_column(String(16), nullable=False)
+    repeat_interval: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    next_payment_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class AutopayParticipant(Base):
+    __tablename__ = "autopay_participants"
+    __table_args__ = (UniqueConstraint("autopay_id", "user_id", name="uq_autopay_participant_user"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    autopay_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("recurring_autopays.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    share_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    approval_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    participation_status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AutopayOccurrence(Base):
+    __tablename__ = "autopay_occurrences"
+    __table_args__ = (UniqueConstraint("autopay_id", "scheduled_date", name="uq_autopay_occurrence_date"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    autopay_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("recurring_autopays.id", ondelete="CASCADE"), nullable=False, index=True)
+    scheduled_date: Mapped[date] = mapped_column(Date, nullable=False)
+    expense_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("expenses.id", ondelete="SET NULL"), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AutopayReminderLog(Base):
+    __tablename__ = "autopay_reminder_logs"
+    __table_args__ = (UniqueConstraint("occurrence_id", "user_id", "reminder_type", name="uq_autopay_reminder_once"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("autopay_occurrences.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reminder_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
