@@ -15,7 +15,7 @@ type PageInfo = { title: string; description: string; endpoint?: string; unavail
 type MemberSummary = { user_id: string; username?: string | null; display_name?: string | null; role?: string }
 type InvitationSummary = { id: string; group_name?: string; inviter_name?: string; status: string; expires_at?: string }
 type SettlementSummary = { id: string; group_id: string; payer_user_id: string; recipient_user_id: string; payer_name?: string; recipient_name?: string; amount: string; currency: string; status: string }
-type NotificationSummary = { id: string; type: string; title: string; body: string; is_read: boolean; created_at: string; group_id?: string | null; related_entity_type?: string | null; related_entity_id?: string | null }
+type NotificationSummary = { id: string; type: string; title: string; body: string; is_read: boolean; created_at: string; group_id?: string | null; related_entity_type?: string | null; related_entity_id?: string | null; related_entity_status?: string | null }
 type DashboardData = { data: Array<{ id: string; group_id: string; description: string; total_amount: string; currency: string; expense_date: string; payer_name?: string | null; paid_by_user_id:string }>; summary: { groups_count: number; expense_count: number; total_owed_by_you: string; total_owed_to_you: string; currency: string }; groups: GroupSummary[] }
 
 const pathConfig: Record<string, PageInfo> = {
@@ -50,6 +50,7 @@ export function ActivityPage() { return <ResourcePage info={pathConfig['/app/act
 export function NotificationsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
+  const [respondingAutopayId, setRespondingAutopayId] = useState<string | null>(null)
   const query = useQuery({ queryKey: ['notifications'], queryFn: ({ signal }) => api.get<Collection<NotificationSummary>>('/notifications', signal) })
   const unread = useQuery({ queryKey: ['notification-count'], queryFn: ({ signal }) => api.get<{ data: { unread_count: number } }>('/notifications/unread-count', signal) })
   async function markRead(id?: string) {
@@ -60,14 +61,21 @@ export function NotificationsPage() {
     } catch (cause) { toast.error(messageFor(cause)) }
   }
   async function respondAutopay(id: string, action: 'accept'|'decline') {
+    if (respondingAutopayId) return
+    setRespondingAutopayId(id)
     try {
       await api.post(`/autopays/${id}/${action}`)
       await Promise.all([queryClient.invalidateQueries({ queryKey: ['notifications'] }), queryClient.invalidateQueries({ queryKey: ['autopays'] }), queryClient.invalidateQueries({ queryKey: ['notification-count'] })])
       toast.success(action === 'accept' ? 'Autopay accepted.' : 'Autopay declined.')
-    } catch (cause) { toast.error(messageFor(cause)) }
+    } catch (cause) {
+      // A stale notification can race with another response. Refresh its status
+      // so answered or closed requests stop showing action buttons immediately.
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ['notifications'] }), queryClient.invalidateQueries({ queryKey: ['notification-count'] })])
+      toast.error(messageFor(cause))
+    } finally { setRespondingAutopayId(null) }
   }
   return <><PageHeader title="Notifications" description="Updates about invitations, expenses, and settlements." action={unread.data?.data.unread_count ? <button className="button button-outline" onClick={() => void markRead()}>Mark all read</button> : undefined} />
-    {query.isPending ? <LoadingState label="Loading notifications" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No notifications">Updates about your groups will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(item => <article className="resource-row resource-row-wrap" key={item.id}><span className="row-copy"><strong>{item.title}</strong><small>{item.body} · {new Date(item.created_at).toLocaleString()}</small></span>{item.type === 'invitation' && item.related_entity_type === 'invitation' && <Link className="button button-small button-primary" to="/app/invitations">Review invitation</Link>}{item.type === 'autopay_invitation' && item.related_entity_type === 'autopay' && item.related_entity_id && <><button className="button button-small button-primary" onClick={()=>void respondAutopay(item.related_entity_id!, 'accept')}>Accept autopay</button><button className="button button-small button-outline" onClick={()=>void respondAutopay(item.related_entity_id!, 'decline')}>Decline</button></>}{!item.is_read && <button className="button button-small button-outline" onClick={() => void markRead(item.id)}>Mark read</button>}</article>)}</div>}
+    {query.isPending ? <LoadingState label="Loading notifications" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No notifications">Updates about your groups will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(item => <article className="resource-row resource-row-wrap" key={item.id}><span className="row-copy"><strong>{item.title}</strong><small>{item.body} · {new Date(item.created_at).toLocaleString()}</small></span>{item.type === 'invitation' && item.related_entity_type === 'invitation' && <Link className="button button-small button-primary" to="/app/invitations">Review invitation</Link>}{item.type === 'autopay_invitation' && item.related_entity_type === 'autopay' && item.related_entity_id && item.related_entity_status === 'pending' && <><button className="button button-small button-primary" disabled={respondingAutopayId === item.related_entity_id} onClick={()=>void respondAutopay(item.related_entity_id!, 'accept')}>{respondingAutopayId === item.related_entity_id ? 'Saving…' : 'Accept autopay'}</button><button className="button button-small button-outline" disabled={respondingAutopayId === item.related_entity_id} onClick={()=>void respondAutopay(item.related_entity_id!, 'decline')}>Decline</button></>}{item.type === 'autopay_invitation' && item.related_entity_type === 'autopay' && item.related_entity_status && item.related_entity_status !== 'pending' && <span className="status-pill">{item.related_entity_status === 'accepted' ? 'Accepted' : item.related_entity_status === 'declined' ? 'Declined' : 'Request closed'}</span>}{!item.is_read && <button className="button button-small button-outline" onClick={() => void markRead(item.id)}>Mark read</button>}</article>)}</div>}
   </>
 }
 

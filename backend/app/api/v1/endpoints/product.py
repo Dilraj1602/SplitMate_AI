@@ -793,6 +793,7 @@ def autopay_action(autopay_id: UUID, action: str, db: Session = Depends(get_db),
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Autopay not found.")
     if action in {"accept", "decline"}:
         if participant.approval_status != "pending": raise HTTPException(status.HTTP_409_CONFLICT, "This request has already been answered.")
+        if item.status != "pending": raise HTTPException(status.HTTP_409_CONFLICT, "This autopay request is no longer open.")
         participant.approval_status = "accepted" if action == "accept" else "declined"
         if action == "accept": participant.accepted_at = datetime.now(UTC)
         elif item.status == "pending": item.status = "declined"
@@ -801,6 +802,14 @@ def autopay_action(autopay_id: UUID, action: str, db: Session = Depends(get_db),
             declined = db.scalar(select(func.count()).select_from(AutopayParticipant).where(AutopayParticipant.autopay_id == item.id, AutopayParticipant.approval_status == "declined")) or 0
             item.status = "declined" if declined else "active" if pending == 0 else "pending"
         action_text = "accepted" if action == "accept" else "declined"
+        now = datetime.now(UTC)
+        db.query(Notification).filter(
+            Notification.user_id == user.id,
+            Notification.type == "autopay_invitation",
+            Notification.related_entity_type == "autopay",
+            Notification.related_entity_id == item.id,
+            Notification.is_read.is_(False),
+        ).update({Notification.is_read: True, Notification.read_at: now}, synchronize_session=False)
     else:
         if user.id == item.created_by_user_id:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a participant can manage their participation.")
@@ -1028,11 +1037,21 @@ def list_notifications(limit: int = Query(default=50, ge=1, le=100), offset: int
     query = select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc())
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     items = db.scalars(query.limit(limit).offset(offset)).all()
+    autopay_ids = {item.related_entity_id for item in items
+        if item.type == "autopay_invitation" and item.related_entity_type == "autopay" and item.related_entity_id}
+    autopay_states: dict[UUID, tuple[str, str]] = {}
+    if autopay_ids:
+        rows = db.execute(select(AutopayParticipant.autopay_id, AutopayParticipant.approval_status, RecurringAutopay.status)
+            .join(RecurringAutopay, RecurringAutopay.id == AutopayParticipant.autopay_id)
+            .where(AutopayParticipant.user_id == user.id, AutopayParticipant.autopay_id.in_(autopay_ids))).all()
+        autopay_states = {autopay_id: (approval_status, autopay_status) for autopay_id, approval_status, autopay_status in rows}
     return _collection([{
         "id": str(item.id), "type": item.type, "title": item.title, "body": item.body,
         "group_id": str(item.group_id) if item.group_id else None,
         "related_entity_type": item.related_entity_type,
         "related_entity_id": str(item.related_entity_id) if item.related_entity_id else None,
+        "related_entity_status": ("closed" if autopay_states[item.related_entity_id][0] == "pending" and autopay_states[item.related_entity_id][1] != "pending"
+            else autopay_states[item.related_entity_id][0]) if item.related_entity_id in autopay_states else None,
         "is_read": item.is_read, "created_at": item.created_at.isoformat(),
     } for item in items], total, limit, offset)
 

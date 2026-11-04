@@ -57,11 +57,10 @@ export function FloatingQuickActions() {
       {actions.map(({ label, to, icon: Icon }, index) => {
         const { x, y } = offsets[index]
         const edge = (fabSize - actionSize) / 2
-        const radius = viewportWidth <= 639 ? 76 : viewportWidth <= 1023 ? 85 : 95
-        const labelX = index === 3
-          ? (preferences.position === 'right' ? (viewportWidth <= 639 ? -15 : -10) : (viewportWidth <= 639 ? 15 : 10))
-          : x / radius * 52
-        const labelY = index === 3 ? -(y + (viewportWidth <= 639 ? 92 : 70)) : -y / radius * 52
+        // Keep every label tucked beside its icon. The old All Expenses
+        // special case pushed its label far above the icon, creating the
+        // large button-to-text gap visible over the recent expenses list.
+        const labelX = preferences.position === 'right' ? -52 : 52
         return <Link
         key={label}
         ref={node => { itemRefs.current[index] = node }}
@@ -78,7 +77,7 @@ export function FloatingQuickActions() {
           '--home-x': `${-x}px`,
           '--home-y': `${y}px`,
           '--label-x': `${labelX}px`,
-          '--label-y': `${labelY}px`,
+          '--label-y': '0px',
           transitionDelay: open && !preferences.reduceMotion && preferences.animate ? `${index * 30}ms` : '0ms',
         } as CSSProperties}
         onClick={() => setOpen(false)}

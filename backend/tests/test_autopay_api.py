@@ -52,10 +52,18 @@ def test_autopay_approval_controls_generation_and_reminder_idempotency(monkeypat
         })
         assert created.status_code == 201, created.text
         autopay_id = UUID(created.json()["data"]["id"])
+        invitation = next(item for item in client.get("/api/v1/notifications", headers=bob_headers).json()["data"]
+            if item["related_entity_id"] == str(autopay_id))
+        assert invitation["related_entity_status"] == "pending"
         with Session(engine) as session:
             assert session.scalar(select(func.count()).select_from(Expense)) == 0
 
         assert client.post(f"/api/v1/autopays/{autopay_id}/accept", headers=bob_headers).status_code == 200
+        answered_invitation = next(item for item in client.get("/api/v1/notifications", headers=bob_headers).json()["data"]
+            if item["id"] == invitation["id"])
+        assert answered_invitation["related_entity_status"] == "accepted"
+        assert answered_invitation["is_read"] is True
+        assert client.post(f"/api/v1/autopays/{autopay_id}/accept", headers=bob_headers).status_code == 409
         assert client.post(f"/api/v1/autopays/{autopay_id}/pause", headers=bob_headers).status_code == 200
         with Session(engine) as session:
             process_autopays(session)
@@ -79,6 +87,10 @@ def test_autopay_approval_controls_generation_and_reminder_idempotency(monkeypat
         response = client.post(f"/api/v1/autopays/{declined_id}/decline", headers=bob_headers)
         assert response.status_code == 200
         assert response.json()["data"]["status"] == "declined"
+        declined_invitation = next(item for item in client.get("/api/v1/notifications", headers=bob_headers).json()["data"]
+            if item["related_entity_id"] == declined_id)
+        assert declined_invitation["related_entity_status"] == "declined"
+        assert declined_invitation["is_read"] is True
         with Session(engine) as session:
             process_autopays(session)
             assert session.scalar(select(func.count()).select_from(Expense)) == 1

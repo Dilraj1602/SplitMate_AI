@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
-import { AccountSettingsPage, AllExpensesPage, ExpenseRows, GroupBalancesPage, SecurityPage, SettlementCreatePage, InviteMemberPage } from './ProductPages'
+import { AccountSettingsPage, AllExpensesPage, ExpenseRows, GroupBalancesPage, SecurityPage, SettlementCreatePage, InviteMemberPage, NotificationsPage } from './ProductPages'
 import { ToastProvider } from '../components/ui/ToastProvider'
 import { QuickActionPreferencesProvider } from '../features/quickActions/preferences'
 
@@ -15,6 +15,28 @@ function renderWithQueries(ui: ReactNode, initialEntries = ['/']) {
 }
 
 describe('account settings and expense details', () => {
+  it('removes autopay response actions after accepting from a notification', async () => {
+    let approvalStatus = 'pending'
+    let isRead = false
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/autopays/autopay-id/accept') && init?.method === 'POST') {
+        approvalStatus = 'accepted'
+        isRead = true
+        return new Response(JSON.stringify({ data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/notifications/unread-count')) return new Response(JSON.stringify({ data: { unread_count: isRead ? 0 : 1 } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ data: [{ id: 'notification-id', type: 'autopay_invitation', title: 'New Autopay Request', body: 'Monthly rent', is_read: isRead, created_at: '2026-11-04T12:00:00Z', related_entity_type: 'autopay', related_entity_id: 'autopay-id', related_entity_status: approvalStatus }], pagination: { limit: 50, offset: 0, total: 1 } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    renderWithQueries(<NotificationsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Accept autopay' }))
+    expect(await screen.findByText('Accepted')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Accept autopay' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
+  })
+
   it('separates account settings from the password page', () => {
     render(<MemoryRouter><QuickActionPreferencesProvider><AccountSettingsPage /></QuickActionPreferencesProvider></MemoryRouter>)
     expect(screen.getByRole('link', { name: /Profile information/ })).toHaveAttribute('href', '/app/settings/profile')
