@@ -1,5 +1,5 @@
 from backend.app.models.user import User
-from backend.app.models.auth_otp import AuthOtp
+from backend.app.models.auth_otp import AuthOtp, AuthOtpIpRequest
 from backend.app.models.product import (
     ActivityEvent,
     AutopayParticipant,
@@ -18,7 +18,7 @@ from backend.app.models.product import (
 )
 
 __all__ = [
-    "User", "AuthOtp", "Group", "Membership", "Invitation", "InviteLink",
+    "User", "AuthOtp", "AuthOtpIpRequest", "Group", "Membership", "Invitation", "InviteLink",
     "JoinRequest", "Expense", "ExpenseSplit", "Settlement", "Notification", "ActivityEvent",
     "RecurringAutopay", "AutopayParticipant", "AutopayOccurrence", "AutopayReminderLog",
 ]

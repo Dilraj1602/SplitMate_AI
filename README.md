@@ -43,6 +43,8 @@ postgresql+psycopg://<user>:<password>@localhost:5432/<database>
 
 Set a random `SECRET_KEY` of at least 32 characters in `.env`. Brevo settings are `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, and `BREVO_SENDER_NAME`; the sender must be verified in Brevo. Never put provider credentials in frontend environment variables. For local exploration only, `DEV_OTP_BYPASS=true` plus six-digit `DEV_OTP_CODE` suppresses email and accepts that code only for a normally issued, valid OTP from loopback. Disable this mode after testing; application configuration rejects it outside `ENVIRONMENT=development`.
 
+To send one intentional live delivery check, set `BREVO_TEST_RECIPIENT` to an inbox you control and run `uv run python backend/scripts/manual_brevo_delivery_check.py` from the repository root. The command reports when Brevo accepts the API request; confirm delivery or bounce status in Brevo's transactional email logs.
+
 ```powershell
 uv run alembic -c backend/alembic.ini upgrade head
 ```

@@ -22,7 +22,9 @@ export const router = createBrowserRouter([
   { path: '/register', element: <Navigate to="/signup" replace /> },
   { path: '/verify-email', element: <AuthPage mode="verify" /> },
   { path: '/forgot-password', element: <AuthPage mode="forgot" /> },
-  { path: '/reset-password', element: <AuthPage mode="reset" /> },
+  { path: '/reset-password', element: <Navigate to="/forgot-password" replace /> },
+  { path: '/reset-password/verify', element: <AuthPage mode="reset-code" /> },
+  { path: '/reset-password/new', element: <AuthPage mode="new-password" /> },
   { path: '/invite/:token', element: <InvitePreviewPage /> },
   { path: '/access-denied', element: <AccessDeniedPage /> },
   { path: '/app', element: <RequireSession />, children: [

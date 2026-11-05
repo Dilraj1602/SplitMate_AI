@@ -44,4 +44,6 @@ def get_current_user(
     user = db.scalar(select(User).where(User.id == user_id))
     if not user or not user.is_active or not user.is_email_verified:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "The account is unavailable.", headers={"WWW-Authenticate": "Bearer"})
+    if payload.get("ver", 0) != (user.auth_token_version or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "The access token is no longer valid.", headers={"WWW-Authenticate": "Bearer"})
     return user

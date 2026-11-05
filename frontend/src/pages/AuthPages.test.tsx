@@ -46,7 +46,7 @@ describe('AuthPage registration feedback', () => {
     vi.stubGlobal('fetch', fetch)
     const user = userEvent.setup()
 
-    render(<MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>)
+    render(<ToastProvider><MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter></ToastProvider>)
 
     await user.type(screen.getByLabelText('Full name'), 'Test Person')
     await user.type(screen.getByLabelText('Username'), 'testperson')
@@ -58,6 +58,25 @@ describe('AuthPage registration feedback', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(fetch.mock.calls[0][0]).toContain('/api/v1/auth/register')
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ display_name: 'Test Person', username: 'testperson', email: 'test@example.com', password: 'abcdef' })
+  })
+
+  it('shows email delivery failure and stays on registration instead of claiming success', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: 'Email delivery is temporarily unavailable. Please try again later.' }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    render(<ToastProvider><MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter></ToastProvider>)
+    await user.type(screen.getByLabelText('Full name'), 'Test Person')
+    await user.type(screen.getByLabelText('Username'), 'testperson')
+    await user.type(screen.getByLabelText('Email address'), 'test@example.com')
+    await user.type(screen.getByLabelText('Password'), 'abcdef')
+    await user.type(screen.getByLabelText('Confirm password'), 'abcdef')
+    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Email delivery is temporarily unavailable.')
+    expect(screen.getByRole('heading', { name: 'Create your account' })).toBeInTheDocument()
+    expect(screen.queryByText('Account created. Check your email for a verification code.')).not.toBeInTheDocument()
   })
 
   it('requires six characters and does not call the API for shorter passwords', async () => {
@@ -88,7 +107,7 @@ describe('OTP authentication screens', () => {
     await user.type(screen.getByLabelText('Six-digit code'), '123456')
     await user.click(screen.getByRole('button', { name: 'Verify email' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Email verified. You can sign in now.')
-    expect(screen.getByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/verify-email'), expect.objectContaining({
       body: JSON.stringify({ email: 'person@example.com', code: '123456' }),
     }))
@@ -101,19 +120,90 @@ describe('OTP authentication screens', () => {
     expect(screen.getByRole('button', { name: /resend available in 60s/i })).toBeDisabled()
   })
 
-  it('submits a reset code and new password to the password-reset endpoint', async () => {
-    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'Password updated.' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  it('keeps an invalid password-reset code on the code page', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: 'The code is invalid or expired.' }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetch)
     const user = userEvent.setup()
-    render(<ToastProvider><MemoryRouter initialEntries={['/reset-password?email=person%40example.com']}><AuthProvider><Routes><Route path="/reset-password" element={<AuthPage mode="reset" />} /><Route path="/login" element={<AuthPage mode="login" />} /></Routes></AuthProvider></MemoryRouter></ToastProvider>)
-    await user.type(screen.getByLabelText('Six-digit code'), '654321')
+    render(<ToastProvider><MemoryRouter initialEntries={['/reset-password/verify?email=person%40example.com']}><AuthProvider><Routes><Route path="/reset-password/verify" element={<AuthPage mode="reset-code" />} /><Route path="/reset-password/new" element={<AuthPage mode="new-password" />} /></Routes></AuthProvider></MemoryRouter></ToastProvider>)
+    await user.type(await screen.findByLabelText('Six-digit code'), '654321')
+    await user.click(screen.getByRole('button', { name: 'Verify code' }))
+    expect(await screen.findByText('The code is invalid or expired.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Enter your code' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('New password')).not.toBeInTheDocument()
+  })
+
+  it('does not advance for an unregistered email and displays the requested exact message', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "This email isn't registered." }), { status: 404, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    render(<ToastProvider><MemoryRouter initialEntries={['/forgot-password']}><Routes><Route path="/forgot-password" element={<AuthPage mode="forgot" />} /><Route path="/reset-password/verify" element={<AuthPage mode="reset-code" />} /></Routes></MemoryRouter></ToastProvider>)
+    await user.type(screen.getByLabelText('Email address'), 'missing@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send reset code' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent("This email isn't registered.")
+    expect(screen.getByRole('heading', { name: 'Forgot password?' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Enter your code' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Six-digit code')).not.toBeInTheDocument()
+  })
+
+  it('completes email, OTP, cookie authorization, and password stages separately', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      void init
+      const url = String(input)
+      if (url.endsWith('/auth/password-reset/request')) return new Response(JSON.stringify({ message: 'Verification code sent.', resend_after_seconds: 60 }), { status: 202, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/auth/password-reset/verify')) return new Response(JSON.stringify({ data: { valid: true, expires_in_seconds: 900 } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/auth/password-reset/session')) return new Response(JSON.stringify({ data: { valid: true } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/auth/password-reset/confirm')) return new Response(JSON.stringify({ message: 'Password updated successfully.' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ data: { access_token: 'new-login-token' } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetch)
+    const user = userEvent.setup()
+    render(<ToastProvider><MemoryRouter initialEntries={['/forgot-password']}><AuthProvider><Routes>
+      <Route path="/forgot-password" element={<AuthPage mode="forgot" />} />
+      <Route path="/reset-password/verify" element={<AuthPage mode="reset-code" />} />
+      <Route path="/reset-password/new" element={<AuthPage mode="new-password" />} />
+      <Route path="/login" element={<AuthPage mode="login" />} />
+    </Routes></AuthProvider></MemoryRouter></ToastProvider>)
+
+    await user.type(screen.getByLabelText('Email address'), 'Person@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send reset code' }))
+    expect(await screen.findByRole('heading', { name: 'Enter your code' })).toBeInTheDocument()
+    expect(screen.getByText(/We sent a six-digit code to p\*\*\*@example\.com\./)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Six-digit code'), '123456')
+    await user.click(screen.getByRole('button', { name: 'Verify code' }))
+    expect(await screen.findByRole('heading', { name: 'Choose a new password' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email address')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Six-digit code')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('New password'), 'newpass123')
     await user.type(screen.getByLabelText('Confirm password'), 'newpass123')
-    await user.click(screen.getByRole('button', { name: 'Update password' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Password updated. Sign in with your new password.')
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/password-reset/confirm'), expect.objectContaining({
-      body: JSON.stringify({ email: 'person@example.com', code: '654321', new_password: 'newpass123' }),
-    }))
+    await user.click(screen.getByRole('button', { name: 'Update Password' }))
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(await screen.findByText('Password updated successfully.')).toBeInTheDocument()
+
+    const verificationCall = fetch.mock.calls.find(([url]) => String(url).endsWith('/auth/password-reset/verify'))
+    expect(verificationCall?.[1]).toMatchObject({ credentials: 'include' })
+    expect(new Headers(verificationCall?.[1]?.headers).get('Authorization')).toBeNull()
+    const confirmCall = fetch.mock.calls.find(([url]) => String(url).endsWith('/auth/password-reset/confirm'))
+    expect(JSON.parse(confirmCall?.[1]?.body as string)).toEqual({ new_password: 'newpass123', confirm_password: 'newpass123' })
+    expect(confirmCall?.[1]).toMatchObject({ credentials: 'include' })
+  })
+
+  it('shows the minimal expired page for direct access and clears the session with Start again', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/auth/password-reset/session/revoke')) return new Response(null, { status: 204 })
+      return new Response(JSON.stringify({ detail: 'The password-reset session is invalid or expired.' }), { status: 401, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetch)
+    render(<ToastProvider><MemoryRouter initialEntries={['/reset-password/new']}><Routes><Route path="/forgot-password" element={<AuthPage mode="forgot" />} /><Route path="/reset-password/new" element={<AuthPage mode="new-password" />} /></Routes></MemoryRouter></ToastProvider>)
+    expect(await screen.findByRole('heading', { name: 'Link expired' })).toBeInTheDocument()
+    expect(screen.getByText('This password reset link is no longer valid.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start again' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email address')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send reset code' })).not.toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/password-reset/session'), expect.objectContaining({ credentials: 'include' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Start again' }))
+    expect(await screen.findByRole('heading', { name: 'Forgot password?' })).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/v1/auth/password-reset/session/revoke'), expect.objectContaining({ method: 'POST', credentials: 'include' }))
   })
 })
 

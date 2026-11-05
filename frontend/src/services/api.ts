@@ -16,7 +16,14 @@ export type GroupSummary = {
   status?: 'active' | 'archived'
 }
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const browserHost = typeof window === 'undefined' ? '127.0.0.1' : window.location.hostname
+const configuredApiUrl = import.meta.env.VITE_API_BASE_URL || `http://${browserHost}:8000`
+const apiBaseUrl = (() => {
+  const url = new URL(configuredApiUrl)
+  const loopbackHosts = new Set(['localhost', '127.0.0.1'])
+  if (loopbackHosts.has(browserHost) && loopbackHosts.has(url.hostname)) url.hostname = browserHost
+  return url.toString().replace(/\/$/, '')
+})()
 const API_REQUEST_TIMEOUT_MS = 15_000
 let accessToken: string | undefined
 
@@ -40,13 +47,20 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/json')
-  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+  const usesPasswordResetCookie = path.startsWith('/auth/password-reset/')
+  const bearerToken = usesPasswordResetCookie ? undefined : accessToken
+  if (bearerToken) headers.set('Authorization', `Bearer ${bearerToken}`)
 
   let response: Response
   const timeoutSignal = AbortSignal.timeout(API_REQUEST_TIMEOUT_MS)
   const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal
   try {
-    response = await fetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers, signal })
+    response = await fetch(`${apiBaseUrl}/api/v1${path}`, {
+      ...init,
+      headers,
+      signal,
+      credentials: usesPasswordResetCookie ? 'include' : init.credentials,
+    })
   } catch (cause) {
     if (typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'TimeoutError') {
       throw new ApiError('The request timed out. Please try again.')
@@ -56,9 +70,12 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ApiErrorBody
-    if (response.status === 401) window.dispatchEvent(new Event('splitmate:unauthorized'))
+    if (response.status === 401 && bearerToken) window.dispatchEvent(new Event('splitmate:unauthorized'))
+    const safeAuthServiceError = response.status === 503 && path.startsWith('/auth/') && typeof body.detail === 'string'
+      ? body.detail
+      : undefined
     const message = response.status >= 500
-      ? 'We couldn’t complete that request. Please try again.'
+      ? safeAuthServiceError || 'We couldn’t complete that request. Please try again.'
       : response.status === 422 && typeof body.detail !== 'string'
         ? 'Please check the information and try again.'
         : body.error?.message || (typeof body.detail === 'string' ? body.detail : undefined) || 'We couldn’t complete that request. Please try again.'

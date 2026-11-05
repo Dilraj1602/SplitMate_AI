@@ -41,6 +41,22 @@ def test_settings_allow_database_independent_app_configuration() -> None:
     assert configured.database_url is None
 
 
+def test_brevo_settings_trim_values_and_validate_sender() -> None:
+    configured = Settings(_env_file=None, brevo_api_key="  test-key  ", brevo_sender_email=" sender@example.com ")
+
+    assert configured.brevo_api_key == "test-key"
+    assert str(configured.brevo_sender_email) == "sender@example.com"
+
+
+def test_invalid_brevo_sender_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="valid email address"):
+        Settings(_env_file=None, brevo_sender_email="not-an-email")
+
+
+def test_settings_load_env_file_from_project_root() -> None:
+    assert Settings.model_config["env_file"] == PROJECT_ROOT / ".env"
+
+
 def test_development_settings_default_to_local_vite_cors_origins() -> None:
     configured = Settings(_env_file=None)
 

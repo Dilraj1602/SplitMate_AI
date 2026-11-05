@@ -1,13 +1,17 @@
 
-from pydantic import Field, field_validator, model_validator
+from pathlib import Path
+
+from pydantic import EmailStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     database_url: str | None = None
     brevo_api_key: str | None = None
-    brevo_sender_email: str = "wolfstrix360@gmail.com"
-    brevo_sender_name: str = "SplitMateAi"
+    brevo_sender_email: EmailStr | None = None
+    brevo_sender_name: str = "SplitMate AI"
     secret_key: str | None = None
     otp_expiry_minutes: int = 5
     otp_max_attempts: int = 5
@@ -25,7 +29,7 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -37,6 +41,29 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: object) -> object:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("brevo_api_key", "dev_otp_code", mode="before")
+    @classmethod
+    def strip_optional_credentials(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("brevo_sender_email", mode="before")
+    @classmethod
+    def normalize_sender_email(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("brevo_sender_name", mode="before")
+    @classmethod
+    def normalize_sender_name(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or "SplitMate AI"
         return value
 
     @field_validator("secret_key")

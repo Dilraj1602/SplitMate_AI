@@ -1,30 +1,66 @@
 import ipaddress
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.dependencies import get_current_user, get_db
 from backend.app.config import settings
-from backend.app.models import AuthOtp, User
-from backend.app.schemas.auth import EmailOtpRequest, EmailRequest, LoginRequest, PasswordResetRequest, RegisterRequest
+from backend.app.models import User
+from backend.app.schemas.auth import EmailOtpRequest, EmailRequest, LoginRequest, PasswordResetConfirm, RegisterRequest
 from backend.app.services import auth as auth_service
 from backend.app.services.auth import EMAIL_VERIFICATION, PASSWORD_RESET, OtpRateLimitError
 from backend.app.services.email import EmailConfigurationError, EmailDeliveryError, send_auth_code
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+logger = logging.getLogger(__name__)
+RESET_COOKIE = "splitmate_password_reset"
+RESET_COOKIE_PATH = "/api/v1/auth/password-reset"
 
 
 @router.get("/me", summary="Restore the signed-in user")
 def current_user(user: User = Depends(get_current_user)):
     return {"data": {"id": str(user.id), "email": user.email, "username": user.username, "display_name": user.display_name}}
-GENERIC_RESET = {"message": "If an eligible account matches, an email will be sent if delivery succeeds. If no email arrives, try again later."}
+def _require_reset_origin(request: Request) -> None:
+    origin = request.headers.get("origin", "").rstrip("/")
+    allowed = {value.rstrip("/") for value in settings.effective_cors_origins}
+    if not origin or origin not in allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "The password-reset request origin is not allowed.")
+
+
+def _set_reset_cookie(response: Response, token: str) -> None:
+    production = settings.environment.lower() == "production"
+    response.set_cookie(
+        RESET_COOKIE,
+        token,
+        max_age=auth_service.PASSWORD_RESET_SESSION_MINUTES * 60,
+        httponly=True,
+        secure=production or settings.environment.lower() != "development",
+        samesite="none" if production or settings.environment.lower() != "development" else "lax",
+        path=RESET_COOKIE_PATH,
+    )
+
+
+def _clear_reset_cookie(response: Response) -> None:
+    production = settings.environment.lower() == "production"
+    response.delete_cookie(
+        RESET_COOKIE,
+        path=RESET_COOKIE_PATH,
+        httponly=True,
+        secure=production or settings.environment.lower() != "development",
+        samesite="none" if production or settings.environment.lower() != "development" else "lax",
+    )
 
 
 async def _send_code(db: Session, user: User, purpose: str) -> bool:
     try:
-        code = auth_service.issue_otp(db, user, purpose)
+        # Keep the OTP and invalidation of its predecessor uncommitted until
+        # Brevo accepts delivery. On provider failure, rollback preserves the
+        # previous usable code and avoids consuming the resend window.
+        code = auth_service.issue_otp(db, user, purpose, commit=False)
     except OtpRateLimitError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Please wait before requesting another code.") from exc
     except RuntimeError as exc:
@@ -32,20 +68,21 @@ async def _send_code(db: Session, user: User, purpose: str) -> bool:
     if settings.dev_otp_bypass and settings.environment.lower() == "development":
         # Local testing mode deliberately skips external delivery. The code is
         # still issued as a normal purpose-bound, expiring, single-use OTP.
+        db.commit()
         return False
     try:
         await send_auth_code(user.email, purpose, code)
     except (EmailConfigurationError, EmailDeliveryError) as exc:
-        otp = db.scalar(select(AuthOtp).where(
-            AuthOtp.email == user.email,
-            AuthOtp.purpose == purpose,
-            AuthOtp.consumed_at.is_(None),
-        ).order_by(AuthOtp.created_at.desc()))
-        if otp:
-            from datetime import UTC, datetime
-            otp.invalidated_at = datetime.now(UTC)
-            db.commit()
+        db.rollback()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is temporarily unavailable. Please try again later.") from exc
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("OTP persistence failed after provider acceptance", extra={
+            "email_operation": purpose.lower(), "error_category": "otp_persistence_failure",
+        })
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The email was accepted but the code could not be saved. Please request a new code.") from exc
     return True
 
 
@@ -143,37 +180,85 @@ async def resend_verification(payload: EmailRequest, request: Request, db: Sessi
 
 @router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED, summary="Request a password reset code")
 async def request_password_reset(payload: EmailRequest, request: Request, db: Session = Depends(get_db)):
-    # Development test codes are accepted only from local clients.
+    email = str(payload.email).strip().lower()
+    client_ip = request.client.host if request.client else "unknown"
     if settings.dev_otp_bypass:
         _require_loopback_for_dev_otp(request)
-        user = db.scalar(select(User).where(func.lower(User.email) == str(payload.email).lower()))
-        if user and user.is_active and user.is_email_verified:
-            await _send_code(db, user, PASSWORD_RESET)
-            return {"message": "Local development code is ready. Email is disabled in this mode."}
-        return GENERIC_RESET
-    user = db.scalar(select(User).where(func.lower(User.email) == str(payload.email).lower()))
-    if user and user.is_active and user.is_email_verified:
-        try:
-            await _send_code(db, user, PASSWORD_RESET)
-        except HTTPException as exc:
-            # Keep account existence private for reset requests, including cooldown/provider errors.
-            if exc.status_code not in (status.HTTP_429_TOO_MANY_REQUESTS, status.HTTP_503_SERVICE_UNAVAILABLE):
-                raise
-    return GENERIC_RESET
+    try:
+        auth_service.record_password_reset_request_ip(db, client_ip)
+    except OtpRateLimitError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many password-reset requests. Please try again later.") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Authentication is not configured.") from exc
+    user = db.scalar(select(User).where(func.lower(User.email) == email))
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This email isn't registered.")
+    if not user.is_active or not user.is_email_verified:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This account can't reset its password.")
+    email_sent = await _send_code(db, user, PASSWORD_RESET)
+    return {
+        "message": "Local development code is ready; email was not sent." if not email_sent else "Verification code sent.",
+        "expires_in_seconds": auth_service.settings.otp_expiry_minutes * 60,
+        "resend_after_seconds": auth_service.settings.otp_resend_cooldown_seconds,
+    }
 
 
-@router.post("/password-reset/confirm", summary="Verify a reset code and set a new password")
-def confirm_password_reset(payload: PasswordResetRequest, request: Request, db: Session = Depends(get_db)):
+@router.post("/password-reset/verify", summary="Verify a password-reset OTP and establish a reset session")
+def verify_password_reset_code(payload: EmailOtpRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    _require_reset_origin(request)
     _require_loopback_for_dev_otp(request)
-    email = str(payload.email).lower()
-    user = auth_service.consume_otp(db, email, PASSWORD_RESET, payload.code)
-    if not user or not user.is_active or not user.is_email_verified:
-        if user:
-            db.rollback()
+    token = auth_service.issue_password_reset_session(db, str(payload.email).strip().lower(), payload.code)
+    if not token:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The code is invalid or expired.")
-    user.hashed_password = auth_service.hash_password(payload.new_password)
-    db.commit()
-    return {"message": "Password updated. Sign in with your new password."}
+    _set_reset_cookie(response, token)
+    return {"data": {"valid": True, "expires_in_seconds": auth_service.PASSWORD_RESET_SESSION_MINUTES * 60}}
+
+
+@router.get("/password-reset/session", summary="Check the current password-reset session")
+def check_password_reset_session(request: Request, db: Session = Depends(get_db)):
+    token = request.cookies.get(RESET_COOKIE)
+    if token and auth_service.get_password_reset_session(db, token):
+        return {"data": {"valid": True}}
+    response = JSONResponse({"detail": "The password-reset session is invalid or expired."}, status_code=status.HTTP_401_UNAUTHORIZED)
+    _clear_reset_cookie(response)
+    return response
+
+
+@router.post("/password-reset/session/revoke", summary="Revoke the current password-reset session")
+def revoke_password_reset_session(request: Request, response: Response, db: Session = Depends(get_db)):
+    _require_reset_origin(request)
+    token = request.cookies.get(RESET_COOKIE)
+    if token:
+        try:
+            auth_service.revoke_password_reset_session(db, token)
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The reset session could not be cleared. Please try again.") from exc
+    _clear_reset_cookie(response)
+    return {"data": {"revoked": True}}
+
+
+@router.post("/password-reset/confirm", summary="Set a new password using the reset session")
+def confirm_password_reset(payload: PasswordResetConfirm, request: Request, db: Session = Depends(get_db)):
+    _require_reset_origin(request)
+    token = request.cookies.get(RESET_COOKIE)
+    if not token:
+        response = JSONResponse({"detail": "The password-reset session is invalid or expired. Start again."}, status_code=status.HTTP_401_UNAUTHORIZED)
+        _clear_reset_cookie(response)
+        return response
+    try:
+        user = auth_service.complete_password_reset(db, token, payload.new_password)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Password reset database transaction failed", extra={"error_category": "password_reset_database_failure"})
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The password could not be updated. Please try again.") from exc
+    if not user:
+        response = JSONResponse({"detail": "The password-reset session is invalid or expired. Start again."}, status_code=status.HTTP_401_UNAUTHORIZED)
+        _clear_reset_cookie(response)
+        return response
+    response = Response(content='{"message":"Password updated successfully."}', media_type="application/json")
+    _clear_reset_cookie(response)
+    return response
 
 
 @router.post("/login", summary="Sign in with a verified account")

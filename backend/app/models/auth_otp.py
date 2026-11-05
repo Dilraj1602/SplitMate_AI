@@ -20,4 +20,18 @@ class AuthOtp(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reset_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reset_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AuthOtpIpRequest(Base):
+    """Database-backed OTP request rate-limit event; stores no raw IP or email."""
+    __tablename__ = "auth_otp_ip_requests"
+    __table_args__ = (Index("ix_auth_otp_ip_requests_ip_purpose_created", "ip_hash", "purpose", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ip_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
