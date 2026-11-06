@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    text,
     Text,
     UniqueConstraint,
     Uuid,
@@ -31,6 +32,7 @@ class Group(Base):
     description: Mapped[str | None] = mapped_column(String(500))
     currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
+    join_approval_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -67,11 +69,31 @@ class Invitation(Base):
 
 class InviteLink(Base):
     __tablename__ = "invite_links"
+    __table_args__ = (Index(
+        "uq_invite_links_one_active_per_group", "group_id", unique=True,
+        postgresql_where=text("revoked_at IS NULL"),
+        sqlite_where=text("revoked_at IS NULL"),
+    ),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     group_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    encrypted_token: Mapped[str] = mapped_column(String(256), nullable=False)
+    expiration_option: Mapped[str] = mapped_column(String(16), default="never", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class JoinCode(Base):
+    __tablename__ = "join_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    encrypted_code: Mapped[str] = mapped_column(String(256), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

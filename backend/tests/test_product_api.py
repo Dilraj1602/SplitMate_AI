@@ -1,5 +1,7 @@
 from collections.abc import Generator
-from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime, timedelta
+from threading import Barrier
 from decimal import Decimal
 from uuid import UUID
 
@@ -11,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from backend.app.db.session import Base
 from backend.app.dependencies import get_db
 from backend.app.main import app
-from backend.app.models import Expense, Group, Membership, User
+from backend.app.models import Expense, Group, InviteLink, JoinCode, Membership, User
 from backend.app.services.auth import hash_password, make_access_token
 
 
@@ -44,15 +46,21 @@ def test_group_expense_balance_settlement_and_notifications(monkeypatch):
         group_response = client.post("/api/v1/groups", headers=alice_headers, json={"name": "Weekend", "description": "Trip"})
         assert group_response.status_code == 201, group_response.text
         group_id = group_response.json()["data"]["id"]
+        assert group_response.json()["data"]["join_approval_required"] is False
+        assert client.patch(f"/api/v1/groups/{group_id}", headers=alice_headers, json={"join_approval_required": True}).status_code == 200
 
         with Session(engine) as session:
             session.add(Membership(group_id=UUID(group_id), user_id=bob_id, role="member", status="active"))
             session.commit()
 
-        link_response = client.post(f"/api/v1/groups/{group_id}/invite-links", headers=alice_headers)
-        assert link_response.status_code == 201, link_response.text
+        link_response = client.get(f"/api/v1/groups/{group_id}/invite-links", headers=alice_headers)
+        assert link_response.status_code == 200, link_response.text
         invite_url = link_response.json()["data"]["url"]
         token = invite_url.rsplit("/", 1)[-1]
+        assert group_response.json()["data"]["invite_url"] == invite_url
+        assert client.get(f"/api/v1/groups/{group_id}/invite-links", headers=alice_headers).json()["data"]["url"] == invite_url
+        assert client.get(f"/api/v1/groups/{group_id}/invite-links", headers=bob_headers).json()["data"]["url"] == invite_url
+        assert client.post(f"/api/v1/groups/{group_id}/invite-links", headers=alice_headers).status_code == 405
         assert client.get(f"/api/v1/invite-links/{token}/preview").status_code == 200
         join_request = client.post(f"/api/v1/invite-links/{token}/join-requests", headers=carol_headers)
         assert join_request.status_code == 202, join_request.text
@@ -157,6 +165,167 @@ def test_group_expense_balance_settlement_and_notifications(monkeypatch):
         assert bob_notifications.json()["pagination"]["total"] >= 1
         assert client.get("/api/v1/activity", headers=alice_headers).status_code == 200
         assert client.get(f"/api/v1/groups/{group_id}", headers=bob_headers).status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()
+
+
+def test_multi_user_invite_link_join_codes_approvals_and_member_controls(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    secret = "test-secret-key-that-is-at-least-32-bytes-long"
+    monkeypatch.setattr("backend.app.dependencies.settings.secret_key", secret)
+    monkeypatch.setattr("backend.app.services.auth.settings.secret_key", secret)
+    monkeypatch.setattr("backend.app.api.v1.endpoints.product.settings.secret_key", secret)
+
+    def override_db() -> Generator[Session, None, None]:
+        with Session(engine, autoflush=False) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        names = ("owner", "bob", "carol", "dave", "erin", "frank", "grace", "heidi")
+        with Session(engine) as session:
+            people = [User(username=name, display_name=name.title(), email=f"{name}@example.com", hashed_password=hash_password("password123"), is_active=True, is_email_verified=True) for name in names]
+            session.add_all(people)
+            session.commit()
+            tokens = {person.username: make_access_token(person) for person in people}
+
+        client = TestClient(app)
+        headers = {name: {"Authorization": f"Bearer {token}"} for name, token in tokens.items()}
+        created_group = client.post("/api/v1/groups", headers=headers["owner"], json={"name": "Open group"})
+        assert created_group.status_code == 201
+        group_id = created_group.json()["data"]["id"]
+        assert created_group.json()["data"]["join_approval_required"] is False
+
+        initial_invite_url = created_group.json()["data"]["invite_url"]
+        link = client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"])
+        assert link.status_code == 200
+        token = link.json()["data"]["url"].rsplit("/", 1)[-1]
+        assert link.json()["data"]["url"] == initial_invite_url
+        assert client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"]).json()["data"]["url"] == initial_invite_url
+        for option in ("1_hour", "5_hours", "24_hours", "7_days", "never"):
+            updated = client.patch(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"], json={"expiration_option": option})
+            assert updated.status_code == 200
+            persistent = client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"]).json()["data"]
+            assert persistent["expiration_option"] == option
+            assert persistent["url"] == initial_invite_url
+        assert client.patch(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"], json={"expiration_option": "1_hour"}).status_code == 200
+        with Session(engine) as session:
+            persistent_link = session.query(InviteLink).filter_by(group_id=UUID(group_id)).one()
+            persistent_link.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+        assert client.get(f"/api/v1/invite-links/{token}/preview").status_code == 404
+        assert client.patch(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"], json={"expiration_option": "never"}).status_code == 200
+        assert client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"]).json()["data"]["url"] == initial_invite_url
+        assert client.get(f"/api/v1/invite-links/{token}/preview").status_code == 200
+        assert client.get(f"/api/v1/invite-links/{token}/preview").json()["data"]["approval_required"] is False
+        assert client.post(f"/api/v1/invite-links/{token}/join-requests", headers=headers["bob"]).json()["status"] == "joined"
+        assert client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["bob"]).json()["data"]["url"] == initial_invite_url
+        assert client.patch(f"/api/v1/groups/{group_id}/invite-links", headers=headers["bob"], json={"expiration_option": "7_days"}).status_code == 403
+        assert client.delete(f"/api/v1/groups/{group_id}/invite-links", headers=headers["bob"]).status_code == 403
+        assert client.post(f"/api/v1/invite-links/{token}/join-requests", headers=headers["carol"]).json()["status"] == "joined"
+        assert client.post(f"/api/v1/invite-links/{token}/join-requests", headers=headers["bob"]).json()["status"] == "already_member"
+        assert client.patch(f"/api/v1/groups/{group_id}", headers=headers["owner"], json={"join_approval_required": True}).status_code == 200
+
+        created_code = client.post(f"/api/v1/groups/{group_id}/join-codes", headers=headers["owner"])
+        assert created_code.status_code == 201
+        code = created_code.json()["data"]["code"]
+        assert len(code) == 6 and code.isdigit()
+        with Session(engine) as session:
+            stored_code = session.query(JoinCode).one()
+            assert stored_code.code_hash != code
+            assert stored_code.encrypted_code != code
+        code_state = client.get(f"/api/v1/groups/{group_id}/join-codes", headers=headers["owner"])
+        assert code_state.json()["data"]["active"] is True
+        assert code_state.json()["data"]["code"] == code
+        code_expiry = datetime.fromisoformat(code_state.json()["data"]["expires_at"])
+        if code_expiry.tzinfo is None:
+            code_expiry = code_expiry.replace(tzinfo=UTC)
+        remaining = code_expiry - datetime.now(UTC)
+        assert timedelta(minutes=4) <= remaining <= timedelta(minutes=5)
+        assert client.post(f"/api/v1/join-codes/join", headers=headers["dave"], json={"code": code.lower()}).json()["status"] == "joined"
+        assert client.post(f"/api/v1/join-codes/join", headers=headers["heidi"], json={"code": code}).json()["status"] == "joined"
+        assert client.post(f"/api/v1/join-codes/join", headers=headers["bob"], json={"code": code}).json()["status"] == "already_member"
+        assert client.post("/api/v1/join-codes/join", headers=headers["frank"], json={"code": "999999"}).status_code == 404
+        assert client.post(f"/api/v1/groups/{group_id}/join-codes", headers=headers["bob"]).status_code == 403
+        assert client.get(f"/api/v1/groups/{group_id}/join-codes", headers=headers["bob"]).status_code == 403
+        assert client.delete(f"/api/v1/groups/{group_id}/join-codes", headers=headers["bob"]).status_code == 403
+        with Session(engine) as session:
+            stored_code = session.query(JoinCode).one()
+            stored_code.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+        assert client.post("/api/v1/join-codes/join", headers=headers["frank"], json={"code": code}).status_code == 404
+        assert client.get(f"/api/v1/groups/{group_id}/join-codes", headers=headers["owner"]).json()["data"]["active"] is False
+        code = client.post(f"/api/v1/groups/{group_id}/join-codes", headers=headers["owner"]).json()["data"]["code"]
+        assert client.delete(f"/api/v1/groups/{group_id}/join-codes", headers=headers["owner"]).status_code == 200
+        assert client.post("/api/v1/join-codes/join", headers=headers["frank"], json={"code": code}).status_code == 404
+
+        assert client.patch(f"/api/v1/groups/{group_id}", headers=headers["owner"], json={"join_approval_required": True}).status_code == 200
+        approval_link = client.get(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"])
+        approval_token = approval_link.json()["data"]["url"].rsplit("/", 1)[-1]
+        assert approval_link.json()["data"]["url"] == initial_invite_url
+        assert client.get(f"/api/v1/invite-links/{approval_token}/preview").json()["data"]["approval_required"] is True
+        for person in ("erin", "frank", "grace"):
+            joined = client.post(f"/api/v1/invite-links/{approval_token}/join-requests", headers=headers[person])
+            assert joined.status_code == 202 and joined.json()["status"] == "pending"
+        assert client.patch(f"/api/v1/groups/{group_id}", headers=headers["owner"], json={"join_approval_required": False}).status_code == 200
+        requests = client.get(f"/api/v1/groups/{group_id}/join-requests", headers=headers["owner"]).json()["data"]
+        request_ids = {row["username"]: row["id"] for row in requests}
+        assert client.post(f"/api/v1/groups/{group_id}/join-requests/{request_ids['erin']}/approve", headers=headers["owner"]).status_code == 200
+        assert client.post(f"/api/v1/groups/{group_id}/join-requests/{request_ids['frank']}/reject", headers=headers["owner"]).status_code == 200
+        assert client.post(f"/api/v1/groups/{group_id}/join-requests/approve-all", headers=headers["owner"]).json()["data"]["approved"] == 1
+        assert client.get(f"/api/v1/groups/{group_id}/members", headers=headers["erin"]).status_code == 200
+        assert client.get(f"/api/v1/groups/{group_id}/members", headers=headers["frank"]).status_code == 404
+
+        assert client.delete(f"/api/v1/groups/{group_id}/invite-links", headers=headers["owner"]).status_code == 200
+        assert client.get(f"/api/v1/invite-links/{approval_token}/preview").status_code == 404
+        assert client.post(f"/api/v1/invite-links/{approval_token}/join-requests", headers=headers["frank"]).status_code == 404
+        assert client.delete(f"/api/v1/groups/{group_id}/members/{people[2].id}", headers=headers["owner"]).status_code == 200
+        assert client.get(f"/api/v1/groups/{group_id}/members", headers=headers["carol"]).status_code == 404
+        assert client.delete(f"/api/v1/groups/{group_id}/members/{people[0].id}", headers=headers["owner"]).status_code == 409
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()
+
+
+def test_simultaneous_group_join_requests_are_recorded_once_per_user(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'concurrent-joins.sqlite'}", connect_args={"check_same_thread": False, "timeout": 30})
+    Base.metadata.create_all(engine)
+    secret = "test-secret-key-that-is-at-least-32-bytes-long"
+    monkeypatch.setattr("backend.app.dependencies.settings.secret_key", secret)
+    monkeypatch.setattr("backend.app.services.auth.settings.secret_key", secret)
+
+    def override_db() -> Generator[Session, None, None]:
+        with Session(engine, autoflush=False) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        with Session(engine) as session:
+            people = [User(username=name, display_name=name.title(), email=f"{name}@example.com", hashed_password=hash_password("password123"), is_active=True, is_email_verified=True) for name in ("owner", "bob", "carol")]
+            session.add_all(people)
+            session.commit()
+            tokens = [make_access_token(person) for person in people]
+        client = TestClient(app)
+        owner_headers = {"Authorization": f"Bearer {tokens[0]}"}
+        group = client.post("/api/v1/groups", headers=owner_headers, json={"name": "Concurrent join"}).json()["data"]
+        group_id = group["id"]
+        assert client.patch(f"/api/v1/groups/{group_id}", headers=owner_headers, json={"join_approval_required": True}).status_code == 200
+        invite = client.get(f"/api/v1/groups/{group_id}/invite-links", headers=owner_headers).json()["data"]["url"]
+        token = invite.rsplit("/", 1)[-1]
+        barrier = Barrier(2)
+
+        def request_join(access_token: str) -> int:
+            barrier.wait(timeout=5)
+            response = TestClient(app).post(f"/api/v1/invite-links/{token}/join-requests", headers={"Authorization": f"Bearer {access_token}"})
+            return response.status_code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(pool.map(request_join, tokens[1:]))
+        assert statuses == [202, 202]
+        requests = client.get(f"/api/v1/groups/{group_id}/join-requests", headers=owner_headers)
+        assert len(requests.json()["data"]) == 2
     finally:
         app.dependency_overrides.pop(get_db, None)
         engine.dispose()

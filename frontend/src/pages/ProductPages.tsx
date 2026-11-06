@@ -1,9 +1,9 @@
-import { useMemo, useRef, useState, type FormEvent, type HTMLAttributes, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type HTMLAttributes, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ArrowRight, Plus, Users, WalletCards, ReceiptText, CircleDollarSign, HandCoins, Activity, Eye, EyeOff, UserRound, Settings } from 'lucide-react'
 import { useAuth } from '../app/auth'
-import { api, ApiError, type Collection, type GroupSummary } from '../services/api'
+import { api, apiRequest, ApiError, type Collection, type GroupSummary } from '../services/api'
 import { EmptyState, ErrorState, LoadingState, Notice } from '../components/ui/Feedback'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useToast } from '../components/ui/ToastProvider'
@@ -13,6 +13,7 @@ import { assignMemberColors } from '../features/analytics/memberColors'
 
 type PageInfo = { title: string; description: string; endpoint?: string; unavailable?: string }
 type MemberSummary = { user_id: string; username?: string | null; display_name?: string | null; role?: string }
+type ExpirationOption = '1_hour' | '5_hours' | '24_hours' | '7_days' | 'never'
 type InvitationSummary = { id: string; group_name?: string; inviter_name?: string; status: string; expires_at?: string }
 type SettlementSummary = { id: string; group_id: string; payer_user_id: string; recipient_user_id: string; payer_name?: string; recipient_name?: string; amount: string; currency: string; status: string }
 type NotificationSummary = { id: string; type: string; title: string; body: string; is_read: boolean; created_at: string; group_id?: string | null; related_entity_type?: string | null; related_entity_id?: string | null; related_entity_status?: string | null }
@@ -143,14 +144,76 @@ export function GroupCreatePage() { return <MutationPage title="Create a group" 
 export function GroupSettingsPage() { const { groupId = '' } = useParams(); return <MutationPage title="Group settings" description="Update the group details you are allowed to manage." endpoint={`/groups/${groupId}`} method="patch" fields={[{ name: 'name', label: 'Group name', required: true }, { name: 'description', label: 'Description', required: false }]} submit="Save changes" /> }
 export function MembersPage() {
   const { groupId = '' } = useParams()
+  const toast = useToast()
+  const client = useQueryClient()
   const query = useQuery({ queryKey: ['members', groupId], queryFn: ({ signal }) => api.get<Collection<MemberSummary>>(`/groups/${groupId}/members`, signal) })
-  return <><PageHeader title="Members and invitations" description="Active members and pending invitations for this group." action={<><Link className="button button-primary" to={`/app/groups/${groupId}/members/invite`}>Invite a member</Link><Link className="button button-outline" to={`/app/groups/${groupId}/members/invite-link`}>Create invite link</Link></>} /><GroupTabs groupId={groupId} />
-    {query.isPending ? <LoadingState label="Loading members" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No members yet">Group members will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(member => <div className="resource-row" key={member.user_id}><span className="avatar" aria-hidden="true">{(member.display_name || member.username || 'M').slice(0, 1).toUpperCase()}</span><span className="row-copy"><strong>{member.display_name || member.username || 'Group member'}</strong><small>{member.username ? `@${member.username} · ` : ''}{member.role || 'Member'}</small></span></div>)}</div>}
-    <section className="panel section-gap"><h2>Membership actions</h2><p className="muted-copy">Removing members and leaving groups are not enabled until outstanding-balance and administrator-transfer rules are resolved.</p></section>
+  const profile = useQuery({ queryKey: ['profile'], queryFn: ({ signal }) => api.get<{ data: { id: string } }>('/users/me', signal) })
+  const admin = Boolean(profile.data && query.data?.data.some(member => member.user_id === profile.data.data.id && member.role === 'admin'))
+  async function removeMember(member: MemberSummary) {
+    if (!window.confirm(`Remove ${member.display_name || member.username || 'this member'} from the group?`)) return
+    try {
+      await apiRequest(`/groups/${groupId}/members/${member.user_id}`, { method: 'DELETE' })
+      toast.success('Member removed from the group.')
+      await Promise.all([client.invalidateQueries({ queryKey: ['members', groupId] }), client.invalidateQueries({ queryKey: ['groups'] }), client.invalidateQueries({ queryKey: ['dashboard'] })])
+    } catch (cause) { toast.error(messageFor(cause)) }
+  }
+  return <><PageHeader title="Members and invitations" description="Manage group membership and join requests." action={admin ? <Link className="button button-primary" to={`/app/groups/${groupId}/members/invite`}>Invite a member</Link> : undefined} /><GroupTabs groupId={groupId} />
+    {query.isPending ? <LoadingState label="Loading members" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No members yet">Group members will appear here.</EmptyState> : <div className="resource-list">{query.data.data.map(member => <div className="resource-row" key={member.user_id}><span className="avatar" aria-hidden="true">{(member.display_name || member.username || 'M').slice(0, 1).toUpperCase()}</span><span className="row-copy"><strong>{member.display_name || member.username || 'Group member'}</strong><small>{member.username ? `@${member.username} · ` : ''}{member.role || 'Member'}</small></span>{admin && <button type="button" className="button button-small button-outline" onClick={() => void removeMember(member)}>Remove</button>}</div>)}</div>}
+    {admin && <MembershipAdminTools groupId={groupId} />}
   </>
 }
+
+function MembershipAdminTools({ groupId }: { groupId: string }) {
+  const toast = useToast()
+  const client = useQueryClient()
+  const [busy, setBusy] = useState('')
+  const [issuedCode, setIssuedCode] = useState('')
+  const requests = useQuery({ queryKey: ['join-requests', groupId], queryFn: ({ signal }) => api.get<Collection<{ id: string; user_id: string; username: string; display_name: string; created_at: string }>>(`/groups/${groupId}/join-requests`, signal) })
+  const joinCode = useQuery({ queryKey: ['group-join-code', groupId], queryFn: ({ signal }) => api.get<{ data: { active: boolean; code: string | null; expires_at: string | null } }>(`/groups/${groupId}/join-codes`, signal) })
+  async function refresh() {
+    await Promise.all([
+      client.invalidateQueries({ queryKey: ['join-requests', groupId] }),
+      client.invalidateQueries({ queryKey: ['group-join-code', groupId] }),
+      client.invalidateQueries({ queryKey: ['members', groupId] }),
+      client.invalidateQueries({ queryKey: ['groups'] }),
+    ])
+  }
+  async function mutate(key: string, path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: unknown, success?: string) {
+    if (busy) return
+    setBusy(key)
+    try {
+      if (method === 'POST') await api.post(path, body)
+      else if (method === 'PATCH') await api.patch(path, body)
+      else await apiRequest(path, { method })
+      if (success) toast.success(success)
+      await refresh()
+    } catch (cause) { toast.error(messageFor(cause)) }
+    finally { setBusy('') }
+  }
+  async function createCode() {
+    if (busy) return
+    setBusy('code')
+    try {
+      const result = await api.post<{ data: { code: string } }>(`/groups/${groupId}/join-codes`)
+      setIssuedCode(result.data.code)
+      toast.success('Temporary join code created. It expires in five minutes.')
+      await refresh()
+    } catch (cause) { toast.error(messageFor(cause)) }
+    finally { setBusy('') }
+  }
+  const pending = requests.data?.data ?? []
+  return <div className="section-gap membership-admin-tools">
+    <section className="panel"><div className="panel-heading"><div><h2>Temporary join code</h2><p className="muted-copy">Anyone with the code can join for five minutes. Code joins do not require approval.</p></div><button className="button button-primary" disabled={busy !== ''} onClick={() => void createCode()}>{busy === 'code' ? 'Creating…' : 'Generate code'}</button></div>
+      {(issuedCode || joinCode.data?.data.code) && <div className="field-wrap link-result"><label htmlFor="issued-join-code">Active join code</label><input id="issued-join-code" value={issuedCode || joinCode.data?.data.code || ''} readOnly/><button className="button button-outline" onClick={() => { if (!issuedCode) setIssuedCode(joinCode.data?.data.code || ''); void navigator.clipboard.writeText(issuedCode || joinCode.data?.data.code || '').then(() => toast.success('Join code copied.')).catch(() => toast.error('Could not copy the code. Select and copy it manually.')) }}>Copy code</button></div>}
+      {joinCode.isPending ? <LoadingState label="Checking active code" /> : joinCode.isError ? <ErrorState message={messageFor(joinCode.error)} onRetry={() => void joinCode.refetch()} /> : <div className="panel-heading membership-subheading"><p className="muted-copy">{joinCode.data.data.active ? `An active code expires ${new Date(joinCode.data.data.expires_at || '').toLocaleString()}. The code is shown once when generated.` : 'No active join code.'}</p><button className="button button-small button-outline" disabled={busy !== '' || !joinCode.data.data.active} onClick={() => { setIssuedCode(''); void mutate('code-revoke', `/groups/${groupId}/join-codes`, 'DELETE', undefined, 'Join code revoked.') }}>Revoke code</button></div>}
+    </section>
+    <section className="panel"><div className="panel-heading"><div><h2>Pending join requests</h2><p className="muted-copy">{pending.length} awaiting review</p></div><button className="button button-small button-outline" disabled={busy !== '' || pending.length === 0} onClick={() => void mutate('approve-all', `/groups/${groupId}/join-requests/approve-all`, 'POST', undefined, 'All pending requests approved.')}>Approve all</button></div>
+      {requests.isPending ? <LoadingState label="Loading join requests" /> : requests.isError ? <ErrorState message={messageFor(requests.error)} onRetry={() => void requests.refetch()} /> : pending.length ? <div className="resource-list">{pending.map(item => <div className="resource-row" key={item.id}><span className="row-copy"><strong>{item.display_name || item.username}</strong><small>@{item.username} · Requested {new Date(item.created_at).toLocaleDateString()}</small></span><span className="row-actions"><button className="button button-small button-primary" disabled={busy !== ''} onClick={() => void mutate(`approve-${item.id}`, `/groups/${groupId}/join-requests/${item.id}/approve`, 'POST', undefined, 'Join request approved.')}>Approve</button><button className="button button-small button-outline" disabled={busy !== ''} onClick={() => void mutate(`reject-${item.id}`, `/groups/${groupId}/join-requests/${item.id}/reject`, 'POST', undefined, 'Join request rejected.')}>Reject</button></span></div>)}</div> : <p className="muted-copy">No pending requests.</p>}
+    </section>
+  </div>
+}
 export function InviteMemberPage() { const { groupId = '' } = useParams(); return <InviteMemberForm groupId={groupId}/> }
-export function InviteLinkPage() { const { groupId = '' } = useParams(); return <InviteLinkCreator groupId={groupId} /> }
+export function InviteLinkPage() { const { groupId = '' } = useParams(); return <InviteLinkSettings groupId={groupId} /> }
 export function BalancesPage() { const { groupId = '' } = useParams(); return <GroupBalancesPage groupId={groupId}/> }
 export function SettlementsPage() {
   const { groupId = '' } = useParams()
@@ -202,15 +265,20 @@ function ProfileEditor() {
 function InvitePreview() {
   const toast=useToast()
   const { token = '' } = useParams()
-  const query = useQuery({ queryKey: ['invite-preview', token], queryFn: ({ signal }) => api.get<{ data: { name?: string; description?: string } }>(`/invite-links/${encodeURIComponent(token)}/preview`, signal), enabled: Boolean(token) })
+  const query = useQuery({ queryKey: ['invite-preview', token], queryFn: ({ signal }) => api.get<{ data: { name?: string; description?: string; approval_required: boolean } }>(`/invite-links/${encodeURIComponent(token)}/preview`, signal), enabled: Boolean(token) })
   const [busy, setBusy] = useState(false)
+  const [joinResult, setJoinResult] = useState<{ status: string; message: string }>()
+  const autoJoinAttempted = useRef(false)
   const { authenticated } = useAuth()
   const queryClient = useQueryClient()
-  async function requestJoin() {
+  const requestJoin = useCallback(async () => {
+    if (busy) return
     setBusy(true)
     try {
-      await api.post(`/invite-links/${encodeURIComponent(token)}/join-requests`)
-      toast.success('Your request was sent. Group membership is pending administrator approval.')
+      const result = await api.post<{ status: string; message: string }>(`/invite-links/${encodeURIComponent(token)}/join-requests`)
+      setJoinResult(result)
+      if (result.status === 'pending') toast.info(result.message)
+      else toast.success(result.message)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['invitations'] }),
         queryClient.invalidateQueries({ queryKey: ['notifications'] }),
@@ -221,11 +289,15 @@ function InvitePreview() {
       ])
     } catch (cause) { toast.error(messageFor(cause)) }
     finally { setBusy(false) }
-  }
+  }, [busy, token, toast, queryClient])
+  useEffect(() => {
+    if (!authenticated || !query.data || query.data.data.approval_required || autoJoinAttempted.current) return
+    autoJoinAttempted.current = true
+    void requestJoin()
+  }, [authenticated, query.data, requestJoin])
   return <><PageHeader title="Group invitation" description="Review this group before requesting to join." />
-    {query.isPending ? <LoadingState label="Loading invitation" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : <section className="panel"><h2>{query.data.data.name || 'Invitation link'}</h2><p className="muted-copy">{query.data.data.description || 'The invitation preview contains limited group information.'}</p></section>}
-    {authenticated ? <button className="button button-primary" onClick={requestJoin} disabled={busy || query.isError}>{busy ? 'Sending…' : 'Request to join'}</button> : <Link to="/login" className="button button-primary">Sign in to continue</Link>}
-    <p className="auth-contract-note">Opening this link does not add you to the group.</p>
+    {query.isPending ? <LoadingState label="Loading invitation" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : <section className="panel"><h2>{query.data.data.name || 'Invitation link'}</h2><p className="muted-copy">{query.data.data.description || 'Join this group to share expenses and balances.'}</p><p className="muted-copy">{query.data.data.approval_required ? 'An administrator will review your request before you join.' : 'You will join the group immediately.'}</p></section>}
+    {authenticated ? <>{joinResult ? <Notice>{joinResult.message}</Notice> : <button className="button button-primary" onClick={requestJoin} disabled={busy || query.isError || query.isPending}>{busy ? 'Joining…' : query.data?.data.approval_required ? 'Request to join' : 'Join group'}</button>}</> : <Link to="/login" className="button button-primary">Sign in to continue</Link>}
   </>
 }
 export function AccessDeniedPage() { return <><PageHeader title="Sign in required" description="Sign in to continue." /><Link className="button button-primary" to="/login">Go to sign in</Link></> }
@@ -233,8 +305,31 @@ export function AccessDeniedPage() { return <><PageHeader title="Sign in require
 function GroupsListPage() {
   const query = useQuery({ queryKey: ['groups'], queryFn: ({ signal }) => api.get<Collection<GroupSummary>>('/groups?limit=20&offset=0', signal) })
   return <><PageHeader title="Groups" description="Shared spaces for trips, homes, and everyday plans." action={<Link to="/app/groups/new" className="button button-primary"><Plus size={16} />Create group</Link>} />
-    {query.isPending ? <LoadingState label="Loading groups" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No groups yet">Create a group to start organizing shared expenses.</EmptyState> : <div className="resource-list">{query.data.data.map(group => <Link key={group.id} className="resource-row group-row" to={`/app/groups/${group.id}`}><span className="row-icon"><WalletCards size={18} /></span><span className="row-copy"><strong>{group.name}</strong><small>{group.description || `${group.member_count ?? '—'} members`}</small></span><span className="status-label">{group.status === 'archived' ? 'Archived' : 'Active'}</span><ArrowRight size={16} /></Link>)}</div>}
+    <div className="groups-page-layout"><JoinCodeEntry />
+    <section className="panel groups-list-panel"><div className="panel-heading groups-list-heading"><div><h2>Your groups</h2><p className="muted-copy">Open a group to view its expenses, members, and balances.</p></div><span className="groups-count">{query.data?.data.length ?? 0} groups</span></div>
+      {query.isPending ? <LoadingState label="Loading groups" /> : query.isError ? <ErrorState message={messageFor(query.error)} onRetry={() => void query.refetch()} /> : query.data.data.length === 0 ? <EmptyState title="No groups yet">Create a group to start organizing shared expenses.</EmptyState> : <div className="resource-list groups-resource-list">{query.data.data.map(group => <Link key={group.id} className="resource-row group-row" to={`/app/groups/${group.id}`}><span className="row-icon"><WalletCards size={18} /></span><span className="row-copy"><strong>{group.name}</strong><small>{group.member_count ?? '—'} members{group.description ? ` · ${group.description}` : ''}</small></span><span className={`status-label ${group.status === 'archived' ? 'status-label-archived' : ''}`}>{group.status === 'archived' ? 'Archived' : 'Active'}</span><ArrowRight size={16} /></Link>)}</div>}
+    </section></div>
   </>
+}
+
+function JoinCodeEntry() {
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const toast = useToast()
+  const client = useQueryClient()
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    try {
+      const response = await api.post<{ message?: string; status?: string }>('/join-codes/join', { code: code.replace(/\s|-/g, '').toUpperCase() })
+      toast.success(response.message || 'You joined the group.')
+      setCode('')
+      await Promise.all([client.invalidateQueries({ queryKey: ['groups'] }), client.invalidateQueries({ queryKey: ['dashboard'] })])
+    } catch (cause) { toast.error(messageFor(cause)) }
+    finally { setBusy(false) }
+  }
+  return <section className="panel join-group-panel"><div className="join-group-copy"><span className="join-group-icon"><Users size={18}/></span><div><h2>Join a group</h2><p className="muted-copy">Enter the 6-digit code shared by a group admin.</p></div></div><form className="inline-form join-group-form" onSubmit={submit}><label className="sr-only" htmlFor="group-join-code">6-digit group join code</label><input id="group-join-code" value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Enter 6-digit code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" required/><button className="button button-primary" disabled={busy || code.length !== 6}>{busy ? 'Joining…' : 'Join group'}</button></form></section>
 }
 
 function ResourcePage({ info, action, tabs }: { info: PageInfo; action?: ReactNode; tabs?: ReactNode }) {
@@ -400,26 +495,62 @@ function SettlementRow({ item, groupId }: { item: SettlementSummary; groupId: st
   return <article className="resource-row resource-row-wrap"><span className="row-copy"><strong>{item.payer_name || 'Payer'} → {item.recipient_name || 'Recipient'}</strong><small>{status} · {item.currency} {item.amount}</small></span>{status === 'pending' && (recipient || creator) && <span className="row-actions">{recipient && <><button className="button button-small button-primary" disabled={busy} onClick={() => respond('confirm')}>Confirm</button><button className="button button-small button-outline" disabled={busy} onClick={() => respond('reject')}>Reject</button></>}{creator && <button className="button button-small button-outline" disabled={busy} onClick={() => respond('cancel')}>Cancel</button>}</span>}</article>
 }
 
-function InviteLinkCreator({ groupId }: { groupId: string }) {
-  const toast=useToast()
-  const [shareUrl, setShareUrl] = useState('')
+function InviteLinkSettings({ groupId }: { groupId: string }) {
+  const toast = useToast()
+  const client = useQueryClient()
   const [busy, setBusy] = useState(false)
-  async function createLink() {
-    setBusy(true); setShareUrl('')
+  const group = useQuery({ queryKey: ['group', groupId], queryFn: ({ signal }) => api.get<{ data: GroupSummary & { join_approval_required: boolean } }>(`/groups/${groupId}`, signal) })
+  const invitation = useQuery({ queryKey: ['group-invite-link', groupId], queryFn: ({ signal }) => api.get<{ data: { id: string; url: string; active: boolean; revoked: boolean; expiration_option: ExpirationOption; expires_at: string | null; can_manage: boolean } }>(`/groups/${groupId}/invite-links`, signal) })
+  const item = invitation.data?.data
+  const admin = item?.can_manage === true
+
+  async function copyLink() {
+    if (!item?.url || !item.active) return
+    try { await navigator.clipboard.writeText(item.url); toast.success('Invitation link copied.') }
+    catch { toast.error('Could not copy the link. Select and copy it manually.') }
+  }
+  async function changeExpiration(expiration_option: ExpirationOption) {
+    if (!admin || !item || item.revoked || busy) return
+    setBusy(true)
     try {
-      const response = await api.post<{ data?: { url?: string; invite_url?: string } }>(`/groups/${groupId}/invite-links`)
-      const url = response.data?.url || response.data?.invite_url
-      if (!url) throw new Error('We couldn’t create the invitation link. Please try again.')
-      setShareUrl(url)
-      toast.success('Invitation link created.')
+      await api.patch(`/groups/${groupId}/invite-links`, { expiration_option })
+      toast.success('Invitation link expiration updated.')
+      await client.invalidateQueries({ queryKey: ['group-invite-link', groupId] })
     } catch (cause) { toast.error(messageFor(cause)) }
     finally { setBusy(false) }
   }
-  async function copyLink() {
-    try { await navigator.clipboard.writeText(shareUrl); toast.success('Invitation link copied.') }
-    catch { toast.error('Could not copy the link. Select and copy it manually.') }
+  async function changeApproval() {
+    if (!admin || !group.data || busy) return
+    setBusy(true)
+    try {
+      await api.patch(`/groups/${groupId}`, { join_approval_required: !group.data.data.join_approval_required })
+      toast.success('Join approval settings updated.')
+      await client.invalidateQueries({ queryKey: ['group', groupId] })
+    } catch (cause) { toast.error(messageFor(cause)) }
+    finally { setBusy(false) }
   }
-  return <><PageHeader title="Create an invite link" description="Share a link so people can request to join your group." /><section className="form-panel"><button className="button button-primary" onClick={createLink} disabled={busy}>{busy ? 'Creating…' : 'Create link'}</button>{shareUrl && <div className="field-wrap link-result"><label htmlFor="share-url">Shareable invitation link</label><input id="share-url" value={shareUrl} readOnly /><button className="button button-outline" onClick={copyLink}>Copy link</button></div>}</section><Notice tone="warning">A group administrator must approve join requests before membership becomes active.</Notice></>
+  async function revokeLink() {
+    if (!admin || !item || item.revoked || busy) return
+    if (!window.confirm('Revoke this invitation link? Anyone using it will no longer be able to join.')) return
+    setBusy(true)
+    try {
+      await apiRequest(`/groups/${groupId}/invite-links`, { method: 'DELETE' })
+      toast.success('Invitation link revoked.')
+      await client.invalidateQueries({ queryKey: ['group-invite-link', groupId] })
+    } catch (cause) { toast.error(messageFor(cause)) }
+    finally { setBusy(false) }
+  }
+
+  return <><PageHeader title="Invitation settings" description="Share the group's persistent invitation link. Membership controls are restricted to administrators." />
+    {group.isPending || invitation.isPending ? <LoadingState label="Loading invitation settings" /> : group.isError ? <ErrorState message={messageFor(group.error)} onRetry={() => void group.refetch()} /> : invitation.isError ? <ErrorState message={messageFor(invitation.error)} onRetry={() => void invitation.refetch()} /> : item && <section className="form-panel invitation-settings-panel">
+      <div className="field-wrap"><label htmlFor="share-url">Group invitation link</label><input id="share-url" value={item.url} readOnly/><button className="button button-outline" onClick={() => void copyLink()} disabled={!item.active}>Copy link</button><small className="field-hint">{item.revoked ? 'This link was revoked.' : item.active ? item.expires_at ? `Active until ${new Date(item.expires_at).toLocaleString()}.` : 'Active · Never expires.' : `This link expired ${item.expires_at ? `on ${new Date(item.expires_at).toLocaleString()}` : ''}.`}</small></div>
+      {admin ? <>
+        <div className="field-wrap"><label htmlFor="invite-expiration">Link validity</label><select id="invite-expiration" value={item.expiration_option} onChange={event => void changeExpiration(event.target.value as ExpirationOption)} disabled={busy || item.revoked}><option value="1_hour">1 hour</option><option value="5_hours">5 hours</option><option value="24_hours">24 hours</option><option value="7_days">7 days</option><option value="never">Never expires</option></select></div>
+        <label className="invite-approval-setting"><input type="checkbox" checked={group.data.data.join_approval_required} onChange={() => void changeApproval()} disabled={busy}/><span><strong>Require admin approval</strong><small>{group.data.data.join_approval_required ? 'Link joins remain pending until approved.' : 'People with the link join immediately.'}</small></span></label>
+        <button className="button button-outline" onClick={() => void revokeLink()} disabled={busy || item.revoked}>Revoke link</button>
+      </> : <p className="muted-copy">{group.data.data.join_approval_required ? 'New members who use this link need admin approval.' : 'People who use this link join immediately.'}</p>}
+    </section>}
+  </>
 }
 
 function ExpenseEditor({ groupId }: { groupId: string }) {

@@ -10,6 +10,7 @@ from backend.app.models.product import (
     Group,
     Invitation,
     InviteLink,
+    JoinCode,
     JoinRequest,
     Membership,
     Notification,
@@ -19,6 +20,6 @@ from backend.app.models.product import (
 
 __all__ = [
     "User", "AuthOtp", "AuthOtpIpRequest", "Group", "Membership", "Invitation", "InviteLink",
-    "JoinRequest", "Expense", "ExpenseSplit", "Settlement", "Notification", "ActivityEvent",
+    "JoinCode", "JoinRequest", "Expense", "ExpenseSplit", "Settlement", "Notification", "ActivityEvent",
     "RecurringAutopay", "AutopayParticipant", "AutopayOccurrence", "AutopayReminderLog",
 ]

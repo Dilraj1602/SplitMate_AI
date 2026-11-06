@@ -1,10 +1,13 @@
+import base64
 import hashlib
+import hmac
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,6 +24,7 @@ from backend.app.models import (
     Group,
     Invitation,
     InviteLink,
+    JoinCode,
     JoinRequest,
     Membership,
     Notification,
@@ -36,6 +40,8 @@ from backend.app.schemas.product import (
     GroupCreate,
     GroupPatch,
     InvitationCreate,
+    InviteLinkPatch,
+    JoinByCode,
     ProfilePatch,
     SettlementCreate,
 )
@@ -46,6 +52,7 @@ router = APIRouter(tags=["Application"])
 INR = "INR"
 ZERO = Decimal("0.00")
 CENT = Decimal("0.01")
+JOIN_CODE_MINUTES = 5
 
 
 def _money(value: Decimal) -> str:
@@ -135,6 +142,7 @@ def _serialize_group(db: Session, group: Group) -> dict:
     return {
         "id": str(group.id), "name": group.name, "description": group.description,
         "currency": group.currency, "status": group.status, "member_count": member_count,
+        "join_approval_required": group.join_approval_required,
         "created_at": group.created_at.isoformat(),
     }
 
@@ -342,6 +350,15 @@ def create_group(payload: GroupCreate, db: Session = Depends(get_db), user: User
     try:
         db.flush()
         db.add(Membership(group_id=group.id, user_id=user.id, role="admin", status="active"))
+        invite_token = secrets.token_urlsafe(32)
+        db.add(InviteLink(
+            group_id=group.id,
+            created_by_user_id=user.id,
+            token_hash=hashlib.sha256(invite_token.encode()).hexdigest(),
+            encrypted_token=_secret_cipher().encrypt(invite_token.encode()).decode(),
+            expiration_option="never",
+            expires_at=None,
+        ))
         _activity(db, group.id, user.id, "group_created", f"{user.display_name or user.username} created {group.name}.", "group", group.id)
         db.commit()
     except IntegrityError as exc:
@@ -350,7 +367,9 @@ def create_group(payload: GroupCreate, db: Session = Depends(get_db), user: User
             raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.") from exc
         raise
     db.refresh(group)
-    return {"data": _serialize_group(db, group)}
+    group_data = _serialize_group(db, group)
+    group_data["invite_url"] = f"{settings.frontend_base_url.rstrip('/')}/invite/{invite_token}"
+    return {"data": group_data}
 
 
 @router.get("/groups/{group_id}", summary="Get a group")
@@ -371,6 +390,8 @@ def update_group(group_id: UUID, payload: GroupPatch, db: Session = Depends(get_
     )):
         raise HTTPException(status.HTTP_409_CONFLICT, "You already have a group with that name.")
     for key, value in changes.items():
+        if key == "join_approval_required" and value is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Join approval must be true or false.")
         if key == "name" and value is not None:
             value = value.strip()
             group.normalized_name = value.lower()
@@ -401,6 +422,103 @@ def list_members(group_id: UUID, db: Session = Depends(get_db), user: User = Dep
         "user_id": str(member.user_id), "username": person.username,
         "display_name": person.display_name, "role": member.role,
     } for member, person in rows]}
+
+
+@router.delete("/groups/{group_id}/members/{member_id}", summary="Remove a member from a group")
+def remove_member(group_id: UUID, member_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
+    target = db.scalar(select(Membership).where(
+        Membership.group_id == group_id, Membership.user_id == member_id, Membership.status == "active",
+    ).with_for_update())
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Active group member not found.")
+    if target.role == "admin":
+        admin_count = db.scalar(select(func.count()).select_from(Membership).where(
+            Membership.group_id == group_id, Membership.role == "admin", Membership.status == "active",
+        )) or 0
+        if admin_count <= 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The last group administrator cannot be removed.")
+    target.status = "left"
+    target.left_at = datetime.now(UTC)
+    now = datetime.now(UTC)
+    db.query(JoinRequest).filter(
+        JoinRequest.group_id == group_id, JoinRequest.user_id == member_id, JoinRequest.status == "pending",
+    ).update({JoinRequest.status: "rejected", JoinRequest.reviewed_at: now, JoinRequest.reviewed_by_user_id: user.id}, synchronize_session=False)
+    removed_user = db.get(User, member_id)
+    if removed_user:
+        _notify(db, member_id, "membership_removed", "Removed from group", f"You were removed from {group.name} by a group administrator.", group_id=group_id)
+    _activity(db, group_id, user.id, "member_removed", "An administrator removed a member from the group.", "user", member_id)
+    db.commit()
+    return {"message": "Member removed from the group."}
+
+
+@router.get("/groups/{group_id}/invite-links", summary="View a group's persistent invitation link")
+def list_group_invite_links(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    membership = _membership(db, group_id, user.id)
+    link = db.scalar(select(InviteLink).where(InviteLink.group_id == group_id))
+    if not link:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The group invitation link is unavailable.")
+    now = datetime.now(UTC)
+    try:
+        token = _secret_cipher().decrypt(link.encrypted_token.encode()).decode()
+    except InvalidToken as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The invitation link could not be read. Check the backend SECRET_KEY.") from exc
+    active = link.revoked_at is None and (link.expires_at is None or _utc(link.expires_at) > now)
+    return {"data": {
+        "id": str(link.id),
+        "url": f"{settings.frontend_base_url.rstrip('/')}/invite/{token}",
+        "active": active,
+        "revoked": link.revoked_at is not None,
+        "expiration_option": link.expiration_option,
+        "expires_at": link.expires_at.isoformat() if link.expires_at else None,
+        "created_at": link.created_at.isoformat(),
+        "can_manage": membership.role == "admin",
+    }}
+
+
+@router.patch("/groups/{group_id}/invite-links", summary="Change the persistent invitation link expiration")
+def update_group_invite_link(group_id: UUID, payload: InviteLinkPatch, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
+    link = db.scalar(select(InviteLink).where(InviteLink.group_id == group_id).with_for_update())
+    if not link:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The group invitation link is unavailable.")
+    if link.revoked_at:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This invitation link has been revoked and cannot be reactivated.")
+    durations = {
+        "1_hour": timedelta(hours=1),
+        "5_hours": timedelta(hours=5),
+        "24_hours": timedelta(hours=24),
+        "7_days": timedelta(days=7),
+        "never": None,
+    }
+    link.expiration_option = payload.expiration_option
+    duration = durations[payload.expiration_option]
+    link.expires_at = datetime.now(UTC) + duration if duration else None
+    db.commit()
+    return {"data": {"expiration_option": link.expiration_option, "expires_at": link.expires_at.isoformat() if link.expires_at else None}}
+
+
+@router.delete("/groups/{group_id}/invite-links", summary="Revoke the persistent group invitation link")
+def revoke_group_invite_links(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
+    now = datetime.now(UTC)
+    link = db.scalar(select(InviteLink).where(InviteLink.group_id == group_id).with_for_update())
+    if not link:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The group invitation link is unavailable.")
+    changed = link.revoked_at is None
+    if changed:
+        link.revoked_at = now
+    db.commit()
+    return {"data": {"revoked": changed}}
 
 
 @router.post("/groups/{group_id}/invitations", status_code=status.HTTP_201_CREATED, summary="Invite a user by email or username")
@@ -501,27 +619,10 @@ def respond_invitation(invitation_id: UUID, decision: str, db: Session = Depends
     return {"message": f"Invitation {item.status}.", "data": _serialize_invitation(db, item)}
 
 
-@router.post("/groups/{group_id}/invite-links", status_code=status.HTTP_201_CREATED, summary="Create a seven-day invite link")
-def create_invite_link(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    _require_admin(db, group_id, user.id)
-    _require_active_group(db, group_id)
-    token = secrets.token_urlsafe(32)
-    link = InviteLink(
-        group_id=group_id, created_by_user_id=user.id,
-        token_hash=hashlib.sha256(token.encode()).hexdigest(),
-        expires_at=datetime.now(UTC) + timedelta(days=7),
-    )
-    db.add(link)
-    db.commit()
-    frontend_origin = settings.frontend_base_url.rstrip("/")
-    url = f"{frontend_origin}/invite/{token}"
-    return {"data": {"id": str(link.id), "url": url, "invite_url": url, "expires_at": link.expires_at.isoformat()}}
-
-
 def _valid_invite_link(db: Session, token: str) -> InviteLink:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     link = db.scalar(select(InviteLink).where(InviteLink.token_hash == token_hash))
-    if not link or link.revoked_at or _utc(link.expires_at) <= datetime.now(UTC):
+    if not link or link.revoked_at or (link.expires_at and _utc(link.expires_at) <= datetime.now(UTC)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation link is invalid or expired.")
     return link
 
@@ -530,30 +631,186 @@ def _valid_invite_link(db: Session, token: str) -> InviteLink:
 def preview_invite_link(token: str, db: Session = Depends(get_db)):
     link = _valid_invite_link(db, token)
     group = _group(db, link.group_id)
-    return {"data": {"name": group.name, "description": group.description, "expires_at": link.expires_at.isoformat()}}
+    if group.status != "active":
+        raise HTTPException(status.HTTP_410_GONE, "This group is archived.")
+    return {"data": {"name": group.name, "description": group.description, "expires_at": link.expires_at.isoformat() if link.expires_at else None, "approval_required": group.join_approval_required}}
 
 
 @router.post("/invite-links/{token}/join-requests", status_code=status.HTTP_202_ACCEPTED, summary="Request to join from an invite link")
 def create_join_request(token: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    link = _valid_invite_link(db, token)
-    group = _group(db, link.group_id)
-    if group.status != "active":
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    candidate = db.scalar(select(InviteLink).where(InviteLink.token_hash == token_hash))
+    if not candidate:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation link is invalid or expired.")
+    group = db.scalar(select(Group).where(Group.id == candidate.group_id).with_for_update())
+    link = db.scalar(select(InviteLink).where(InviteLink.id == candidate.id).with_for_update())
+    if not link or link.revoked_at or (link.expires_at and _utc(link.expires_at) <= datetime.now(UTC)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation link is invalid or expired.")
+    if not group or group.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, "This group is archived.")
     member = db.scalar(select(Membership).where(Membership.group_id == group.id, Membership.user_id == user.id, Membership.status == "active"))
     if member:
-        raise HTTPException(status.HTTP_409_CONFLICT, "You are already a group member.")
-    existing = db.scalar(select(JoinRequest).where(JoinRequest.invite_link_id == link.id, JoinRequest.user_id == user.id, JoinRequest.status == "pending"))
+        return {"status": "already_member", "message": "You are already a group member."}
+    now = datetime.now(UTC)
+    if not group.join_approval_required:
+        membership = db.scalar(select(Membership).where(Membership.group_id == group.id, Membership.user_id == user.id).with_for_update())
+        if membership:
+            membership.status = "active"
+            membership.role = "member"
+            membership.left_at = None
+            membership.joined_at = now
+        else:
+            db.add(Membership(group_id=group.id, user_id=user.id, role="member", status="active"))
+        db.query(JoinRequest).filter(
+            JoinRequest.group_id == group.id, JoinRequest.user_id == user.id, JoinRequest.status == "pending",
+        ).update({JoinRequest.status: "approved", JoinRequest.reviewed_at: now}, synchronize_session=False)
+        _activity(db, group.id, user.id, "member_joined", f"{user.display_name or user.username} joined {group.name} using an invitation link.", "invite_link", link.id)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            member = db.scalar(select(Membership).where(Membership.group_id == group.id, Membership.user_id == user.id, Membership.status == "active"))
+            if not member:
+                raise HTTPException(status.HTTP_409_CONFLICT, "The group membership changed at the same time. Please retry.")
+        return {"status": "joined", "message": f"You joined {group.name}."}
+
+    existing = db.scalar(select(JoinRequest).where(
+        JoinRequest.group_id == group.id, JoinRequest.user_id == user.id, JoinRequest.status == "pending",
+    ).with_for_update())
     if existing:
-        return {"message": "Your join request is already waiting for administrator approval."}
-    join_request = JoinRequest(invite_link_id=link.id, group_id=group.id, user_id=user.id)
-    db.add(join_request)
+        return {"status": "pending", "message": "Your join request is already waiting for administrator approval."}
+    historical = db.scalar(select(JoinRequest).where(JoinRequest.invite_link_id == link.id, JoinRequest.user_id == user.id).with_for_update())
+    if historical:
+        historical.status = "pending"
+        historical.created_at = now
+        historical.reviewed_at = None
+        historical.reviewed_by_user_id = None
+        join_request = historical
+    else:
+        join_request = JoinRequest(invite_link_id=link.id, group_id=group.id, user_id=user.id)
+        db.add(join_request)
     db.flush()
     admins = db.scalars(select(Membership.user_id).where(Membership.group_id == group.id, Membership.role == "admin", Membership.status == "active")).all()
     for admin_id in admins:
         _notify(db, admin_id, "join_request", "Group join request", f"{user.display_name or user.username} requested to join {group.name}.", group_id=group.id, entity_type="join_request", entity_id=join_request.id)
     _activity(db, group.id, user.id, "join_requested", f"{user.display_name or user.username} requested to join {group.name}.", "join_request", join_request.id)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(JoinRequest).where(
+            JoinRequest.group_id == group.id, JoinRequest.user_id == user.id, JoinRequest.status == "pending",
+        ))
+        if not existing:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The join request changed at the same time. Please retry.")
+    return {"status": "pending", "message": "Your request was sent. Group membership is pending administrator approval."}
+
+
+def _join_code_hash(code: str) -> str:
+    if not settings.secret_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Join codes are not configured.")
+    return hmac.new(settings.secret_key.encode(), code.encode(), hashlib.sha256).hexdigest()
+
+
+def _secret_cipher() -> Fernet:
+    if not settings.secret_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Join codes are not configured.")
+    key = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest())
+    return Fernet(key)
+
+
+@router.get("/groups/{group_id}/join-codes", summary="View active temporary join code status")
+def get_join_code(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    now = datetime.now(UTC)
+    item = db.scalar(select(JoinCode).where(
+        JoinCode.group_id == group_id, JoinCode.revoked_at.is_(None), JoinCode.expires_at > now,
+    ).order_by(JoinCode.created_at.desc()))
+    code = None
+    if item:
+        try:
+            code = _secret_cipher().decrypt(item.encrypted_code.encode()).decode()
+        except InvalidToken:
+            code = None
+    return {"data": {"active": bool(item), "code": code, "expires_at": item.expires_at.isoformat() if item else None}}
+
+
+@router.post("/groups/{group_id}/join-codes", status_code=status.HTTP_201_CREATED, summary="Generate a five-minute group join code")
+def create_join_code(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group or group.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This group is unavailable for joining.")
+    try:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        now = datetime.now(UTC)
+        db.query(JoinCode).filter(
+            JoinCode.group_id == group_id, JoinCode.revoked_at.is_(None), JoinCode.expires_at > now,
+        ).update({JoinCode.revoked_at: now}, synchronize_session=False)
+        item = JoinCode(
+            group_id=group_id, created_by_user_id=user.id, code_hash=_join_code_hash(code),
+            encrypted_code=_secret_cipher().encrypt(code.encode()).decode(),
+            expires_at=now + timedelta(minutes=JOIN_CODE_MINUTES),
+        )
+        db.add(item)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"data": {"id": str(item.id), "code": code, "expires_at": item.expires_at.isoformat()}}
+
+
+@router.delete("/groups/{group_id}/join-codes", summary="Revoke the active temporary join code")
+def revoke_join_code(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
+    now = datetime.now(UTC)
+    changed = db.query(JoinCode).filter(
+        JoinCode.group_id == group_id, JoinCode.revoked_at.is_(None), JoinCode.expires_at > now,
+    ).update({JoinCode.revoked_at: now}, synchronize_session=False)
     db.commit()
-    return {"message": "Your request was sent. Group membership is not active until the group administrator approves it."}
+    return {"data": {"revoked": changed}}
+
+
+@router.post("/join-codes/join", summary="Join a group with a temporary code")
+def join_with_code(payload: JoinByCode, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not settings.secret_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Join codes are not configured.")
+    code_hash = _join_code_hash(payload.code)
+    candidate = db.scalar(select(JoinCode).where(JoinCode.code_hash == code_hash))
+    if not candidate:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This join code is invalid or expired.")
+    group = db.scalar(select(Group).where(Group.id == candidate.group_id).with_for_update())
+    item = db.scalar(select(JoinCode).where(JoinCode.id == candidate.id).with_for_update())
+    now = datetime.now(UTC)
+    if not item or item.revoked_at or _utc(item.expires_at) <= now:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This join code is invalid or expired.")
+    if not group or group.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This group is unavailable for joining.")
+    membership = db.scalar(select(Membership).where(Membership.group_id == group.id, Membership.user_id == user.id).with_for_update())
+    if membership and membership.status == "active":
+        return {"status": "already_member", "message": "You are already a group member."}
+    if membership:
+        membership.status = "active"
+        membership.role = "member"
+        membership.left_at = None
+        membership.joined_at = now
+    else:
+        db.add(Membership(group_id=group.id, user_id=user.id, role="member", status="active"))
+    db.query(JoinRequest).filter(
+        JoinRequest.group_id == group.id, JoinRequest.user_id == user.id, JoinRequest.status == "pending",
+    ).update({JoinRequest.status: "approved", JoinRequest.reviewed_at: now}, synchronize_session=False)
+    _activity(db, group.id, user.id, "member_joined", f"{user.display_name or user.username} joined {group.name} using a join code.", "join_code", item.id)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        membership = db.scalar(select(Membership).where(Membership.group_id == group.id, Membership.user_id == user.id, Membership.status == "active"))
+        if not membership:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The group membership changed at the same time. Please retry.")
+    return {"status": "joined", "message": f"You joined {group.name}."}
 
 
 @router.get("/groups/{group_id}/join-requests", summary="List pending join requests for administrators")
@@ -573,12 +830,14 @@ def review_join_request(group_id: UUID, request_id: UUID, decision: str, db: Ses
     _require_admin(db, group_id, user.id)
     if decision not in {"approve", "reject"}:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Join request action not found.")
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
     item = db.scalar(select(JoinRequest).where(JoinRequest.id == request_id, JoinRequest.group_id == group_id).with_for_update())
     if not item:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Join request not found.")
     if item.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, "This join request has already been reviewed.")
-    group = _group(db, group_id)
+    if not group:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
     item.status = "approved" if decision == "approve" else "rejected"
     item.reviewed_at = datetime.now(UTC)
     item.reviewed_by_user_id = user.id
@@ -597,6 +856,40 @@ def review_join_request(group_id: UUID, request_id: UUID, decision: str, db: Ses
     _activity(db, group_id, user.id, f"join_request_{item.status}", f"An administrator {item.status} a join request for {group.name}.", "join_request", item.id)
     db.commit()
     return {"message": f"Join request {item.status}.", "data": {"id": str(item.id), "status": item.status}}
+
+
+@router.post("/groups/{group_id}/join-requests/approve-all", summary="Approve all pending group join requests")
+def approve_all_join_requests(group_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_admin(db, group_id, user.id)
+    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
+    if not group or group.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This group is unavailable for membership changes.")
+    requests = db.scalars(select(JoinRequest).where(
+        JoinRequest.group_id == group_id, JoinRequest.status == "pending",
+    ).order_by(JoinRequest.created_at).with_for_update()).all()
+    now = datetime.now(UTC)
+    processed_users: set[UUID] = set()
+    for item in requests:
+        item.status = "approved"
+        item.reviewed_at = now
+        item.reviewed_by_user_id = user.id
+        if item.user_id not in processed_users:
+            membership = db.scalar(select(Membership).where(
+                Membership.group_id == group_id, Membership.user_id == item.user_id,
+            ).with_for_update())
+            if membership:
+                membership.status = "active"
+                membership.role = "member"
+                membership.left_at = None
+                membership.joined_at = now
+            else:
+                db.add(Membership(group_id=group_id, user_id=item.user_id, role="member", status="active"))
+            processed_users.add(item.user_id)
+        _notify(db, item.user_id, "join_request_response", "Join request update", f"Your request to join {group.name} was approved.", group_id=group_id, entity_type="join_request", entity_id=item.id)
+    if requests:
+        _activity(db, group_id, user.id, "join_requests_approved", f"An administrator approved {len(requests)} join requests for {group.name}.", "group", group_id)
+    db.commit()
+    return {"message": f"Approved {len(requests)} pending request(s).", "data": {"approved": len(requests)}}
 
 
 @router.get("/groups/{group_id}/expenses", summary="List active group expenses")

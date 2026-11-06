@@ -31,6 +31,7 @@ class GroupPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     status: Literal["active", "archived"] | None = None
+    join_approval_required: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -42,6 +43,21 @@ class GroupPatch(BaseModel):
             raise ValueError("Group name is required.")
         return value
 
+
+class JoinByCode(BaseModel):
+    code: str = Field(min_length=6, max_length=6, pattern=r"^[0-9]{6}$")
+
+    @field_validator("code")
+    @classmethod
+    def normalize_join_code(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) != 6 or not value.isdigit():
+            raise ValueError("Enter the 6-digit numeric join code.")
+        return value
+
+
+class InviteLinkPatch(BaseModel):
+    expiration_option: Literal["1_hour", "5_hours", "24_hours", "7_days", "never"]
 
 class InvitationCreate(BaseModel):
     email: EmailStr | None = None

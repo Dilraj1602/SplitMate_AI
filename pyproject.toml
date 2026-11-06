@@ -17,6 +17,7 @@ dependencies = [
     "pyjwt>=2.15.1",
     "pytest>=9.1.1",
     "sqlalchemy>=2.1.6",
+    "cryptography>=50.0.2",
 ]
 
 [tool.pytest.ini_options]

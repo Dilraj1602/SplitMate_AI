@@ -1,20 +1,62 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
-import { AccountSettingsPage, AllExpensesPage, ExpenseRows, GroupBalancesPage, SecurityPage, SettlementCreatePage, InviteMemberPage, NotificationsPage } from './ProductPages'
+import { AccountSettingsPage, AllExpensesPage, ExpenseRows, GroupBalancesPage, SecurityPage, SettlementCreatePage, InviteMemberPage, InviteLinkPage, InvitePreviewPage, NotificationsPage } from './ProductPages'
+import { AuthProvider } from '../app/auth'
 import { ToastProvider } from '../components/ui/ToastProvider'
 import { QuickActionPreferencesProvider } from '../features/quickActions/preferences'
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.sessionStorage.clear() })
 function renderWithQueries(ui: ReactNode, initialEntries = ['/']) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(<ToastProvider><QueryClientProvider client={client}><MemoryRouter initialEntries={initialEntries}>{ui}</MemoryRouter></QueryClientProvider></ToastProvider>)
 }
 
 describe('account settings and expense details', () => {
+  it('lets regular members copy the stable invitation link without management actions', async () => {
+    window.sessionStorage.setItem('splitmate_access_token', 'member-token')
+    const clipboardWrite = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboardWrite } })
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      const body = url.endsWith('/auth/me') ? { data: { id: 'member-id' } }
+        : url.endsWith('/groups/group-id') ? { data: { id: 'group-id', name: 'Trip', status: 'active', join_approval_required: false } }
+          : { data: { id: 'link-id', url: 'http://localhost:5173/invite/persistent-token', active: true, revoked: false, expiration_option: 'never', expires_at: null, can_manage: false } }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<ToastProvider><QueryClientProvider client={client}><MemoryRouter initialEntries={['/app/groups/group-id/members/invite-link']}><AuthProvider><Routes><Route path="/app/groups/:groupId/members/invite-link" element={<InviteLinkPage />} /></Routes></AuthProvider></MemoryRouter></QueryClientProvider></ToastProvider>)
+    const input = await screen.findByLabelText('Group invitation link')
+    expect(input).toHaveValue('http://localhost:5173/invite/persistent-token')
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Link validity')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Require admin approval')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Revoke link' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /create link/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
+    expect(clipboardWrite).toHaveBeenCalledWith('http://localhost:5173/invite/persistent-token')
+  })
+
+  it('joins immediately when an authenticated user opens a no-approval invitation link', async () => {
+    window.sessionStorage.setItem('splitmate_access_token', 'member-token')
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/auth/me')) return new Response(JSON.stringify({ data: { id: 'member-id' } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/invite-links/share-token/preview')) return new Response(JSON.stringify({ data: { name: 'Trip', description: 'Weekend trip', approval_required: false } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/invite-links/share-token/join-requests') && init?.method === 'POST') return new Response(JSON.stringify({ status: 'joined', message: 'You joined Trip.' }), { status: 202, headers: { 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetch)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<ToastProvider><QueryClientProvider client={client}><MemoryRouter initialEntries={['/invite/share-token']}><AuthProvider><Routes><Route path="/invite/:token" element={<InvitePreviewPage />} /></Routes></AuthProvider></MemoryRouter></QueryClientProvider></ToastProvider>)
+    expect((await screen.findAllByText('You joined Trip.')).length).toBeGreaterThan(0)
+    expect(fetch.mock.calls.some(([url, init]) => String(url).endsWith('/invite-links/share-token/join-requests') && init?.method === 'POST')).toBe(true)
+    window.sessionStorage.clear()
+  })
+
   it('removes autopay response actions after accepting from a notification', async () => {
     let approvalStatus = 'pending'
     let isRead = false
