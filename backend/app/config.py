@@ -84,11 +84,16 @@ class Settings(BaseSettings):
 
     @property
     def effective_cors_origins(self) -> list[str]:
-        if self.cors_origins:
-            return self.cors_origins
-        if self.environment.lower() == "development":
-            return ["http://localhost:5173", "http://127.0.0.1:5173"]
-        return []
+        origins = list(self.cors_origins)
+        is_development = self.environment.lower() == "development"
+        if is_development and not origins:
+            origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
+
+        frontend_origin = self.frontend_base_url.rstrip("/")
+        if frontend_origin and (is_development or not frontend_origin.startswith(("http://localhost", "http://127.0.0.1"))):
+            origins.append(frontend_origin)
+
+        return list(dict.fromkeys(origins))
 
 
 settings = Settings()

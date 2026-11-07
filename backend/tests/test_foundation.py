@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from fastapi import FastAPI
 
 from backend.app import dependencies as db_dependencies
 from backend.app import main as main_module
@@ -70,6 +71,47 @@ def test_production_settings_do_not_infer_cors_origins() -> None:
     configured = Settings(_env_file=None, environment="production")
 
     assert configured.effective_cors_origins == []
+
+
+def test_production_frontend_base_url_is_allowed_by_cors() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_base_url="https://splitmate-ai.onrender.com/",
+    )
+
+    assert configured.effective_cors_origins == ["https://splitmate-ai.onrender.com"]
+
+
+def test_production_cors_preflight_allows_frontend_and_rejects_other_origins() -> None:
+    configured = Settings(
+        _env_file=None,
+        environment="production",
+        cors_origins=["http://localhost:5173"],
+        frontend_base_url="https://splitmate-ai.onrender.com",
+    )
+    cors_app = FastAPI()
+    main_module.configure_cors_middleware(cors_app, configured.effective_cors_origins)
+    client = TestClient(cors_app)
+    headers = {
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    }
+
+    allowed = client.options(
+        "/api/v1/auth/login",
+        headers={**headers, "Origin": "https://splitmate-ai.onrender.com"},
+    )
+    rejected = client.options(
+        "/api/v1/auth/login",
+        headers={**headers, "Origin": "https://unapproved.example"},
+    )
+
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "https://splitmate-ai.onrender.com"
+    assert allowed.headers["access-control-allow-credentials"] == "true"
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
 
 
 def test_development_otp_cannot_be_enabled_in_production() -> None:
@@ -169,3 +211,19 @@ def test_development_cors_handles_registration_preflight() -> None:
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_cors_rejects_unapproved_preflight_origin() -> None:
+    client = TestClient(main_module.app)
+
+    response = client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "https://unapproved.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers

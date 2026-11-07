@@ -333,5 +333,3 @@ xxhash==4.0.2
     #   langsmith
 zstandard==0.25.0
     # via langsmith
-
-cryptography>=50.0.2

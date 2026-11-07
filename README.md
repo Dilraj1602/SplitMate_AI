@@ -56,7 +56,7 @@ cd frontend
 npm ci
 ```
 
-The frontend defaults its API base URL to `http://127.0.0.1:8000`. To override it, create `frontend/.env.local` from `frontend/.env.example` and set `VITE_API_BASE_URL`.
+The frontend reads `VITE_API_BASE_URL` from `frontend/.env.local` (copy `frontend/.env.example`). The example points to the deployed API at `https://splitmate-ai.onrender.com`. For local development, set it to `http://127.0.0.1:8000`. The frontend appends `/api/v1` to this base URL. Restart the Vite dev server after changing the value.
 
 ## Run locally
 

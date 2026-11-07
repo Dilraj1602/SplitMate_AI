@@ -16,6 +16,17 @@ from backend.app.services.autopay import process_autopays
 logger = logging.getLogger(__name__)
 
 
+def configure_cors_middleware(app: FastAPI, origins: list[str]) -> None:
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     stopped = asyncio.Event()
@@ -46,15 +57,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(api_v1_router, prefix="/api/v1")
-
-if settings.effective_cors_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.effective_cors_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
-    )
+configure_cors_middleware(app, settings.effective_cors_origins)
 
 
 @app.get("/health", tags=["Health"])
