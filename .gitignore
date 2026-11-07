@@ -227,3 +227,5 @@ debug.log
 !/docs/TESTING_REPORT.md
 !/docs/TEST_CASES.md
 !/docs/FIX_SUMMARY.md
+/END_TO_END_AUDIT_2026-11-06.md
+/local_schema.sql
