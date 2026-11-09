@@ -18,12 +18,16 @@ export type GroupSummary = {
 
 const browserHost = typeof window === 'undefined' ? '127.0.0.1' : window.location.hostname
 const configuredApiUrl = import.meta.env.VITE_API_BASE_URL || `http://${browserHost}:8000`
-const apiBaseUrl = (() => {
+const resolvedApiBaseUrl = (() => {
   const url = new URL(configuredApiUrl)
   const loopbackHosts = new Set(['localhost', '127.0.0.1'])
   if (loopbackHosts.has(browserHost) && loopbackHosts.has(url.hostname)) url.hostname = browserHost
   return url.toString().replace(/\/$/, '')
 })()
+// In Vite development, route API calls through the local dev server so a
+// remote backend does not need to expose permissive localhost CORS rules.
+// `server.proxy` uses the same VITE_API_BASE_URL as its upstream target.
+const apiBaseUrl = import.meta.env.DEV ? '' : resolvedApiBaseUrl
 const API_REQUEST_TIMEOUT_MS = 15_000
 let accessToken: string | undefined
 
