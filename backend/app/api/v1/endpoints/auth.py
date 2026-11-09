@@ -1,7 +1,7 @@
 import ipaddress
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -86,6 +86,39 @@ async def _send_code(db: Session, user: User, purpose: str) -> bool:
     return True
 
 
+def _prepare_registration_code(db: Session, user: User) -> str:
+    """Persist an OTP before returning; email delivery runs after the response."""
+    try:
+        # Materialize the UUID and user row before the OTP service locks it.
+        db.flush()
+        code = auth_service.issue_otp(db, user, EMAIL_VERIFICATION, commit=False)
+        db.commit()
+        return code
+    except OtpRateLimitError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Please wait before requesting another code.") from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Authentication is not configured.") from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "An account with these details already exists.") from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Registration could not be completed. Please try again.") from exc
+
+
+async def _deliver_registration_code(email: str, code: str) -> None:
+    try:
+        await send_auth_code(email, EMAIL_VERIFICATION, code)
+    except (EmailConfigurationError, EmailDeliveryError):
+        # The account and OTP are committed. A user can request another code;
+        # provider latency or downtime must not hold the registration request open.
+        logger.exception("Registration verification email delivery failed", extra={
+            "email_operation": "email_verification", "error_category": "background_delivery_failure",
+        })
+
+
 def _require_loopback_for_dev_otp(request: Request) -> None:
     if not settings.dev_otp_bypass:
         return
@@ -99,7 +132,7 @@ def _require_loopback_for_dev_otp(request: Request) -> None:
 
 
 @router.post("/register", status_code=status.HTTP_202_ACCEPTED, summary="Register and send an email verification code")
-async def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     _require_loopback_for_dev_otp(request)
     email = str(payload.email).strip().lower()
     username = payload.username.strip().lower()
@@ -115,25 +148,32 @@ async def register(payload: RegisterRequest, request: Request, db: Session = Dep
         if password_matches:
             # A cooldown means no new email was attempted. Return 429 instead
             # of a success that would send the UI to an OTP form without a code.
-            email_sent = await _send_code(db, existing, EMAIL_VERIFICATION)
+            if settings.dev_otp_bypass and settings.environment.lower() == "development":
+                _prepare_registration_code(db, existing)
+                db.close()
+                return {
+                    "message": "Local development OTP is enabled; email was not sent. Enter the configured development code.",
+                    "expires_in_seconds": auth_service.settings.otp_expiry_minutes * 60,
+                }
+            code = _prepare_registration_code(db, existing)
+            email_to_deliver = existing.email
+            db.close()
+            background_tasks.add_task(_deliver_registration_code, email_to_deliver, code)
             return {
-                "message": (
-                    "Registration is pending email verification. Check your email for the code."
-                    if email_sent
-                    else "Local development OTP is enabled; email was not sent. Enter the configured development code."
-                ),
+                "message": "Registration is pending email verification. Check your email for the code.",
                 "expires_in_seconds": auth_service.settings.otp_expiry_minutes * 60,
             }
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with these details already exists.")
     user = User(email=email, username=username, display_name=payload.display_name.strip(), hashed_password=auth_service.hash_password(payload.password), is_active=False, is_email_verified=False)
     db.add(user)
-    try:
-        db.commit()
-        db.refresh(user)
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "An account with these details already exists.") from exc
-    email_sent = await _send_code(db, user, EMAIL_VERIFICATION)
+    # The user row and initial OTP commit together, so a failed OTP write cannot
+    # leave an account that cannot complete verification.
+    code = _prepare_registration_code(db, user)
+    email_to_deliver = user.email
+    db.close()
+    email_sent = not (settings.dev_otp_bypass and settings.environment.lower() == "development")
+    if email_sent:
+        background_tasks.add_task(_deliver_registration_code, email_to_deliver, code)
     return {
         "message": (
             "Registration started. Check your email for a verification code."

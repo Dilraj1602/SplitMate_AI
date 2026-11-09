@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type InputHTMLAttributes } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type InputHTMLAttributes } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Eye, EyeOff } from 'lucide-react'
 import { api, ApiError } from '../services/api'
@@ -25,6 +25,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
 function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
   const [visible, setVisible] = useState(false)
   const [busy, setBusy] = useState(false)
+  const submitting = useRef(false)
   const [error, setError] = useState('')
   const toast = useToast()
   const [params] = useSearchParams()
@@ -58,6 +59,7 @@ function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submitting.current) return
     setError('')
     const form = new FormData(event.currentTarget)
     const values = Object.fromEntries(form.entries())
@@ -69,6 +71,7 @@ function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
       setError('Password must be at least 6 characters.')
       return
     }
+    submitting.current = true
     setBusy(true)
     try {
       if (mode === 'login') {
@@ -99,6 +102,7 @@ function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
     } catch (cause) {
       toast.error(cause instanceof ApiError ? cause.message : 'The request could not be completed.')
     } finally {
+      submitting.current = false
       setBusy(false)
     }
   }
@@ -116,7 +120,7 @@ function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
         {(mode === 'login' || mode === 'register') && <div className="field-wrap"><div className="field-label-row"><label htmlFor="password">Password</label>{mode === 'login' && <Link to="/forgot-password" className="text-button">Forgot password?</Link>}</div><div className="password-control"><input id="password" name="password" type={visible ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'login' ? undefined : 6} required aria-describedby="password-hint" /><button type="button" className="password-toggle" onClick={() => setVisible(!visible)} aria-label={visible ? 'Hide password' : 'Show password'}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></div>{mode === 'register' && <small id="password-hint" className="field-hint">Use at least 6 characters.</small>}</div>}
         {mode === 'register' && <div className="field-wrap"><label htmlFor="confirm_password">Confirm password</label><div className="password-control"><input id="confirm_password" name="confirm_password" type={visible ? 'text' : 'password'} autoComplete="new-password" required /><button type="button" className="password-toggle" onClick={() => setVisible(value => !value)} aria-label={visible ? 'Hide password' : 'Show password'}>{visible ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></div>}
         {error && <ErrorState message={error} />}
-        <button className="button button-primary button-full" disabled={busy}>{busy ? 'Please wait…' : current.submit}</button>
+        <button className="button button-primary button-full" disabled={busy} aria-busy={busy}>{busy ? (mode === 'register' ? 'Creating account…' : 'Please wait…') : current.submit}</button>
       </form>
       {mode === 'verify' && <button type="button" className="text-button" disabled={busy || cooldown > 0} onClick={resendCode}>{cooldown ? `Resend available in ${cooldown}s` : 'Resend code'}</button>}
       <div className="auth-switch">{mode === 'login' ? <>New to SplitMate? <Link to="/signup">Create an account</Link></> : mode === 'register' ? <>Already have an account? <Link to="/login">Sign in</Link></> : <Link to="/login">Return to sign in</Link>}</div>

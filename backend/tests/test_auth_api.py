@@ -41,11 +41,11 @@ def test_registration_email_verification_login_and_password_reset(monkeypatch):
         registration_payload = {
             "display_name": "Test Person", "username": "TESTPERSON", "email": "person@example.com", "password": "abcdef",
         }
-        failed_registration = client.post("/api/v1/auth/register", json=registration_payload)
-        assert failed_registration.status_code == 503
+        failed_delivery_registration = client.post("/api/v1/auth/register", json=registration_payload)
+        assert failed_delivery_registration.status_code == 202
         with Session(engine) as session:
             assert session.query(User).count() == 1
-            assert session.query(AuthOtp).count() == 0
+            assert session.query(AuthOtp).count() == 1
 
         registration = client.post("/api/v1/auth/register", json=registration_payload)
         assert registration.status_code == 202
