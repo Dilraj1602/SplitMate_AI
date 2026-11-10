@@ -3,8 +3,8 @@ import hashlib
 import hmac
 import secrets
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, ROUND_DOWN
-from uuid import UUID
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from cryptography.fernet import Fernet, InvalidToken
@@ -46,7 +46,8 @@ from backend.app.schemas.product import (
     SettlementCreate,
 )
 from backend.app.services.auth import hash_password, verify_password
-from backend.app.services.expenses import create_expense_record
+from backend.app.services.expenses import create_expense_record, update_expense_record, void_expense_record
+from backend.app.services.settlements import create_settlement_proposal
 
 router = APIRouter(tags=["Application"])
 INR = "INR"
@@ -1140,17 +1141,7 @@ def update_expense(expense_id: UUID, payload: ExpensePatch, db: Session = Depend
         raise HTTPException(status.HTTP_409_CONFLICT, "Voided expenses cannot be edited.")
     if expense.created_by_user_id != user.id and membership.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the creator or a group administrator can edit this expense.")
-    if payload.total_amount != expense.total_amount:
-        splits = db.scalars(select(ExpenseSplit).where(ExpenseSplit.expense_id == expense.id).order_by(ExpenseSplit.user_id)).all()
-        old_total = expense.total_amount
-        total_paise = int(payload.total_amount * 100)
-        raw = [(split, int((split.amount * total_paise / old_total).to_integral_value(rounding=ROUND_DOWN))) for split in splits]
-        remainder = total_paise - sum(value for _, value in raw)
-        for i, (split, value) in enumerate(raw):
-            split.amount = Decimal(value + (i < remainder)) / 100
-        expense.total_amount = payload.total_amount
-    expense.description = payload.description.strip()
-    expense.updated_at = datetime.now(UTC)
+    update_expense_record(db, expense, description=payload.description, total_amount=payload.total_amount)
     _activity(db, expense.group_id, user.id, "expense_updated", f"{user.display_name or user.username} updated {expense.description}.", "expense", expense.id)
     db.commit()
     db.refresh(expense)
@@ -1164,8 +1155,7 @@ def void_expense(expense_id: UUID, db: Session = Depends(get_db), user: User = D
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the creator or a group administrator can void this expense.")
     if expense.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, "This expense is already voided.")
-    expense.status = "voided"
-    expense.voided_at = datetime.now(UTC)
+    void_expense_record(expense)
     _activity(db, expense.group_id, user.id, "expense_voided", f"{user.display_name or user.username} voided {expense.description}.", "expense", expense.id)
     db.commit()
     return {"data": {"id": str(expense.id), "status": expense.status}}
@@ -1259,41 +1249,9 @@ def get_settlement(settlement_id: UUID, db: Session = Depends(get_db), user: Use
 
 @router.post("/groups/{group_id}/settlements", status_code=status.HTTP_201_CREATED, summary="Propose a settlement")
 def create_settlement(group_id: UUID, payload: SettlementCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    # Lock the group row so concurrent settlement proposals in this group see
-    # the preceding reservation before accepting another amount.
-    group = db.scalar(select(Group).where(Group.id == group_id).with_for_update())
-    if not group:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found.")
-    if group.status != "active":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This group is archived and cannot accept new changes.")
-    _membership(db, group_id, user.id)
-    _validate_members(db, group_id, [user.id, payload.recipient_user_id])
-    if payload.recipient_user_id == user.id:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Payer and recipient must be different users.")
-    if payload.idempotency_key:
-        existing = db.scalar(select(Settlement).where(
-            Settlement.group_id == group_id, Settlement.created_by_user_id == user.id,
-            Settlement.idempotency_key == payload.idempotency_key,
-        ))
-        if existing:
-            return {"data": _serialize_settlement(db, existing)}
-    outstanding, pending = _pairwise_outstanding(db, group_id, user.id, payload.recipient_user_id)
-    available = max(ZERO, outstanding - pending)
-    if available <= ZERO:
-        raise HTTPException(status.HTTP_409_CONFLICT, "You have no outstanding amount to settle with this member.")
-    if payload.currency != group.currency:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Settlement currency must match the group currency.")
-    if payload.amount > available:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Amount exceeds the available outstanding balance of INR {_money(available)}.")
-    item = Settlement(
-        group_id=group_id, payer_user_id=user.id, recipient_user_id=payload.recipient_user_id,
-        created_by_user_id=user.id, amount=payload.amount, currency=payload.currency,
-        idempotency_key=payload.idempotency_key,
-    )
-    db.add(item)
-    db.flush()
-    _notify(db, payload.recipient_user_id, "settlement", "Settlement proposed", f"{user.display_name or user.username} proposed INR {_money(payload.amount)} for {group.name}.", group_id=group_id, entity_type="settlement", entity_id=item.id)
-    _activity(db, group_id, user.id, "settlement_proposed", f"{user.display_name or user.username} proposed a settlement of INR {_money(payload.amount)}.", "settlement", item.id)
+    item = create_settlement_proposal(db, group_id=group_id, created_by_user_id=user.id,
+        recipient_user_id=payload.recipient_user_id, amount=payload.amount, currency=payload.currency,
+        idempotency_key=payload.idempotency_key or str(uuid4()))
     db.commit()
     db.refresh(item)
     return {"data": _serialize_settlement(db, item)}

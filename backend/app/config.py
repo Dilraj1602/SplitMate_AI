@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=list)
     frontend_base_url: str = "http://localhost:5173"
     environment: str = "development"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    ai_provider: str = "ollama"
+    ai_temperature: float = Field(default=0, ge=0, le=2)
+    ai_timeout_seconds: int = Field(default=60, ge=1, le=300)
+    ai_max_retries: int = Field(default=2, ge=0, le=5)
+    whisper_model: str = "tiny"
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

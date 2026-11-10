@@ -13,6 +13,8 @@ See [the project audit](docs/PROJECT_AUDIT.md), [implementation log](docs/IMPLEM
 
 Auth details: [API documentation](docs/API_DOCUMENTATION.md), [database design](docs/DATABASE_DESIGN.md), [backend architecture](docs/BACKEND_ARCHITECTURE.md), [frontend architecture](docs/FRONTEND_ARCHITECTURE.md).
 
+AI assistant implementation: [AI architecture](docs/AI_ARCHITECTURE.md), [AI API](docs/AI_API_DOCUMENTATION.md), [AI database design](docs/AI_DATABASE_DESIGN.md), [AI backend](docs/AI_BACKEND_IMPLEMENTATION.md), [AI frontend](docs/AI_FRONTEND_IMPLEMENTATION.md), [AI setup/testing](docs/AI_SETUP_AND_TESTING.md).
+
 ## Requirements
 
 - Python 3.13 or newer and [`uv`](https://docs.astral.sh/uv/)

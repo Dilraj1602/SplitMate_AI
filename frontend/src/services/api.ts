@@ -29,6 +29,7 @@ const resolvedApiBaseUrl = (() => {
 // `server.proxy` uses the same VITE_API_BASE_URL as its upstream target.
 const apiBaseUrl = import.meta.env.DEV ? '' : resolvedApiBaseUrl
 const API_REQUEST_TIMEOUT_MS = 15_000
+const AI_REQUEST_TIMEOUT_MS = 90_000
 let accessToken: string | undefined
 
 export function setAccessToken(token?: string) {
@@ -49,14 +50,14 @@ export class ApiError extends Error {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/json')
   const usesPasswordResetCookie = path.startsWith('/auth/password-reset/')
   const bearerToken = usesPasswordResetCookie ? undefined : accessToken
   if (bearerToken) headers.set('Authorization', `Bearer ${bearerToken}`)
 
   let response: Response
-  const timeoutSignal = AbortSignal.timeout(API_REQUEST_TIMEOUT_MS)
+  const timeoutSignal = AbortSignal.timeout(path.startsWith('/ai/') ? AI_REQUEST_TIMEOUT_MS : API_REQUEST_TIMEOUT_MS)
   const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal
   try {
     response = await fetch(`${apiBaseUrl}/api/v1${path}`, {
@@ -93,6 +94,7 @@ export const api = {
   get: <T>(path: string, signal?: AbortSignal) => apiRequest<T>(path, { method: 'GET', signal }),
   post: <T>(path: string, body?: unknown) =>
     apiRequest<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
+  upload: <T>(path: string, body: FormData) => apiRequest<T>(path, { method: 'POST', body }),
   patch: <T>(path: string, body: unknown) =>
     apiRequest<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
 }

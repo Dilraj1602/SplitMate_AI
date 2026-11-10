@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity, UserRound, Repeat } from 'lucide-react'
+import { Bell, ChevronDown, LayoutDashboard, Menu, Settings, Users, X, Activity, UserRound, Repeat, Bot } from 'lucide-react'
 import { useAuth } from '../app/auth'
 import { api } from '../services/api'
 import { FloatingQuickActions } from '../features/quickActions/FloatingQuickActions'
@@ -11,6 +11,7 @@ const mainNav = [
   { to: '/app', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/app/groups', label: 'Groups', icon: Users },
   { to: '/app/activity', label: 'Activity', icon: Activity },
+  { to: '/app/assistant', label: 'AI assistant', icon: Bot },
 ]
 
 function AppShellContent() {

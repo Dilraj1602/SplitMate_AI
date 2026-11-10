@@ -134,13 +134,19 @@ class AutopayCreate(BaseModel):
 
 
 class ExpensePatch(BaseModel):
-    description: str = Field(min_length=1, max_length=255)
-    total_amount: Decimal = Field(gt=0)
+    description: str | None = Field(default=None, min_length=1, max_length=255)
+    total_amount: Decimal | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if self.description is None and self.total_amount is None:
+            raise ValueError("Provide a new description or amount.")
+        return self
 
     @field_validator("total_amount")
     @classmethod
-    def total_scale(cls, value: Decimal) -> Decimal:
-        return validate_money_scale(value)
+    def total_scale(cls, value: Decimal | None) -> Decimal | None:
+        return validate_money_scale(value) if value is not None else None
 
 
 class SettlementCreate(BaseModel):

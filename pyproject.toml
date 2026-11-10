@@ -18,6 +18,9 @@ dependencies = [
     "pytest>=9.1.1",
     "sqlalchemy>=2.1.6",
     "cryptography>=50.0.2",
+    "langchain-ollama>=1.0,<2.0",
+    "faster-whisper>=1,<2",
+    "av<19",
 ]
 
 [tool.pytest.ini_options]

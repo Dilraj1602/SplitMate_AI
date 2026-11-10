@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppShell } from '../layouts/AppShell'
 import { useAuth } from './auth'
+import { AIAssistantPage } from '../pages/AIAssistantPage'
 import { AuthPage, LandingPage, NotFoundPage } from '../pages/AuthPages'
 import {
   AccessDeniedPage, ActivityPage, BalancesPage, ExpenseCreatePage, ExpenseDetailPage,
@@ -29,6 +30,7 @@ export const router = createBrowserRouter([
   { path: '/access-denied', element: <AccessDeniedPage /> },
   { path: '/app', element: <RequireSession />, children: [
     { index: true, element: <OverviewPage /> },
+    { path: 'assistant', element: <AIAssistantPage /> },
     { path: 'groups', element: <GroupsPage /> },
     { path: 'groups/new', element: <GroupCreatePage /> },
     { path: 'groups/:groupId', element: <GroupPage /> },

@@ -336,5 +336,30 @@ button { color: inherit; }
   .quick-action-item, .quick-action-fab, .quick-action-fab svg, .quick-action-icon { transition-duration: 0ms !important; }
 }
 .dashboard-activity { grid-template-columns: minmax(0, 1fr); }
+.ai-chat-panel { display:grid; gap:16px; max-width:900px; border:1px solid var(--line); border-radius:16px; padding:20px; background:var(--surface); box-shadow:0 8px 28px #2025220b; }
+.ai-chat-history { display:grid; gap:18px; min-height:260px; max-height:58vh; overflow:auto; padding:4px; }
+.ai-message { display:grid; grid-template-columns:34px minmax(0,1fr); gap:10px; align-items:start; }
+.ai-message-user { margin-left:36px; }
+.ai-message-icon { display:grid; width:32px; height:32px; place-items:center; border-radius:50%; background:#eef3ef; color:var(--brand); font-size:10px; font-weight:700; }
+.ai-message-user .ai-message-icon { background:var(--brand); color:#fff; }
+.ai-message-body { min-width:0; }
+.ai-message-body > p { margin:5px 0; white-space:pre-wrap; }
+.ai-message-body > small { color:var(--muted); }
+.ai-option { display:inline-block; margin:7px 6px 0 0; border:1px solid var(--line); border-radius:20px; padding:6px 10px; font-size:13px; }
+.ai-option-button { background:var(--surface); color:var(--ink); cursor:pointer; }
+.ai-option-button:hover { border-color:var(--brand); color:var(--brand); }
+.ai-transcript-hint { margin:0; color:var(--muted); font-size:12px; }
+.ai-preview { margin-top:12px; border:1px solid var(--line); border-radius:12px; padding:16px; background:#fbfcfb; }
+.ai-preview h3 { margin:0 0 12px; }
+.ai-preview dl { display:grid; grid-template-columns:minmax(100px, .45fr) 1fr; gap:7px 12px; margin:0 0 12px; font-size:14px; }
+.ai-preview dt { color:var(--muted); }
+.ai-preview dd { margin:0; font-weight:600; }
+.ai-preview-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:16px; }
+.ai-chat-form { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end; border-top:1px solid var(--line); padding-top:14px; }
+.ai-chat-form textarea { width:100%; resize:vertical; border:1px solid var(--line); border-radius:10px; padding:12px; font:inherit; }
+.ai-chat-form button { display:flex; align-items:center; gap:7px; }
+.spin { animation:ai-spin 1s linear infinite; }
+@keyframes ai-spin { to { transform:rotate(360deg); } }
+@media(max-width:600px) { .ai-chat-panel { padding:12px; } .ai-message-user { margin-left:12px; } .ai-chat-form { grid-template-columns:1fr; } .ai-chat-form button { justify-content:center; } }
 
 
