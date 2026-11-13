@@ -51,7 +51,7 @@ function CredentialAuthPage({ mode }: { mode: CredentialMode }) {
     setError(''); setBusy(true)
     try {
       await api.post('/auth/resend-verification', { email })
-      toast.info('If an unverified account matches that email, a code will be sent.')
+      toast.info('Verification code sent successfully')
       setCooldown(60)
     } catch (cause) { toast.error(cause instanceof ApiError ? cause.message : 'The request could not be completed.') }
     finally { setBusy(false) }

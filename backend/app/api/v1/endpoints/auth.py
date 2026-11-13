@@ -176,7 +176,7 @@ def register(payload: RegisterRequest, request: Request, background_tasks: Backg
         background_tasks.add_task(_deliver_registration_code, email_to_deliver, code)
     return {
         "message": (
-            "Registration started. Check your email for a verification code."
+            "Verification code sent successfully"
             if email_sent
             else "Local development OTP is enabled; email was not sent. Enter the configured development code."
         ),
